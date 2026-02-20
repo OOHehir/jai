@@ -4,9 +4,13 @@
 #include <functional>
 #include <utility>
 
+#include <dirent.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <pwd.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -14,6 +18,7 @@ using std::filesystem::path;
 
 path prog;
 
+// Self-closing, movable file descriptor, use operator* to access value
 struct Fd {
   int fd_{-1};
 
@@ -35,11 +40,7 @@ struct Fd {
     return *this;
   }
 
-  int operator*() const noexcept
-  {
-    assert(*this);
-    return fd_;
-  }
+  int operator*() const noexcept { return fd_; }
   explicit operator bool() const { return fd_ >= 0; }
   void reset() noexcept
   {
@@ -50,42 +51,38 @@ struct Fd {
   }
 };
 
-template<std::invocable F = std::function<void()>> struct Defer {
-  F f_;
+// Generic RIAA destructor
+struct Defer {
+  std::function<void()> f_;
 
-  Defer(F f) noexcept : f_(std::move(f)) {}
-  ~Defer()
-  {
-    if constexpr (requires { bool(f_); })
-      if (!f_)
-        return;
-    f_();
-  }
-  template<std::same_as<F> U = F> requires std::assignable_from<U, F &&>
+  Defer() noexcept = default;
+  Defer(decltype(f_) f) noexcept : f_(std::move(f)) {}
+  Defer(Defer &&other) noexcept : f_(other.release()) {}
+  ~Defer() { reset(); }
   Defer &operator=(Defer &&other) noexcept
   {
-    f_ = std::move(other.f_);
+    f_ = other.release();
     return *this;
   }
-  template<std::same_as<F> U = F> requires requires(U u) {
-    u = F{};
-    requires !bool(U{});
-  }
-  void reset() noexcept
+  decltype(f_) release() noexcept { return std::exchange(f_, nullptr); }
+  void reset(decltype(f_) f = nullptr) noexcept
   {
-    f_ = F{};
+    if (auto old = std::exchange(f_, f))
+      old();
   }
 };
 
 struct Config {
   std::string user;
-  uid_t uid{};
-  gid_t gid{};
+  uid_t uid = -1;
+  gid_t gid = -1;
   path home;
   Fd homefd;
   Fd jaifd;
 
   void init();
+  [[nodiscard]] Defer asuser();
+  Fd mkudir(int dirfd, path p);
 };
 
 template<typename... Args>
@@ -121,30 +118,25 @@ parsei(const char *s)
   return ret;
 }
 
-Fd
-mkudir(const Fd &dir, path p, uid_t u, gid_t g)
+bool
+dir_empty(int dirfd)
 {
-  int dfd = p.is_absolute() ? -1 : *dir;
-  if (Fd e{openat(dfd, p.c_str(), O_RDONLY)}) {
-    struct stat sb;
-    if (fstat(*e, &sb))
-      syserr("stat({})", p.string());
-    if (!S_ISDIR(sb.st_mode))
-      err("{} must be a directory", p.string());
-    return e;
+  int fd = dup(dirfd);
+  if (fd < 0)
+    syserr("dup");
+  auto dir = fdopendir(fd);
+  if (!dir) {
+    close(fd);
+    syserr("fdopendir");
   }
-  if (errno != ENOENT)
-    syserr("open({})", p.string());
+  Defer cleanup([dir] { closedir(dir); });
 
-  if (mkdirat(dfd, p.c_str(), 0755))
-    syserr("mkdir({})", p.string());
-  Fd d{openat(dfd, p.c_str(), O_RDONLY)};
-  if (!d)
-    syserr("open({})", p.string());
-
-  struct stat sb1, sb2;
-  if (fstat(*d, &sb1))
-    syserr("stat({})", p.string());
+  while (auto de = readdir(dir))
+    if (de->d_name[0] != '.' ||
+        (de->d_name[1] != '\0' &&
+         (de->d_name[1] != '.' || de->d_name[2] != '\0')))
+      return false;
+  return true;
 }
 
 void
@@ -153,27 +145,93 @@ Config::init()
   char buf[512];
   struct passwd pwbuf, *pw{};
 
-  uid = getuid();
+  auto realuid = getuid();
 
   const char *envuser = getenv("SUDO_USER");
-  if (!uid && envuser) {
+  if (realuid == 0 && envuser) {
     if (getpwnam_r(envuser, &pwbuf, buf, sizeof(buf), &pw))
-      err("cannot file password entry for user {}", envuser);
-    user = envuser;
-    uid = pw->pw_uid;
-    gid = pw->pw_gid;
-    home = pw->pw_dir;
+      err("cannot find password entry for user {}", envuser);
   }
-  else {
-    if (getpwuid_r(uid, &pwbuf, buf, sizeof(buf), &pw))
-      err("cannot file password entry for uid {}", uid);
-    user = pw->pw_name;
-    gid = pw->pw_gid;
-    home = pw->pw_dir;
+  else if (getpwuid_r(realuid, &pwbuf, buf, sizeof(buf), &pw))
+    err("cannot find password entry for uid {}", uid);
+
+  user = pw->pw_name;
+  uid = pw->pw_uid;
+  gid = pw->pw_gid;
+  home = pw->pw_dir;
+
+  // Paranoia about ptrace, because we will drop privileges to access
+  // the file system as the user.
+  prctl(PR_SET_DUMPABLE, 0);
+
+  // Set all user permissions except user ID so we can easily drop
+  // privileges in asuser.
+  if (realuid == 0 && uid != 0) {
+    if (initgroups(user.c_str(), gid))
+      syserr("initgroups");
+    if (setgid(gid))
+      syserr("setgid");
   }
 
-  if (!(homefd = open(home.c_str(), O_RDONLY)))
+  auto cleanup = asuser();
+  if (!(homefd = open(home.c_str(), O_PATH | O_CLOEXEC)))
     syserr("{}", home.string());
+}
+
+Defer
+Config::asuser()
+{
+  if (!uid || geteuid())
+    // If target is root or already dropped privileges, do nothing
+    return {};
+  if (seteuid(uid))
+    syserr("seteuid");
+  return Defer{[] { seteuid(0); }};
+}
+
+Fd
+Config::mkudir(int dirfd, path p)
+{
+  auto restore = asuser();
+  auto check = [this, &p](const struct stat &sb) {
+    if (!S_ISDIR(sb.st_mode))
+      err("{}: expected a directory", p.string());
+    if (sb.st_uid != uid)
+      err("{}: expected a directory owned by {}", p.string(), user);
+    if ((sb.st_mode & 0700) != 0700)
+      err("{}: expected a directory with owner rwx permissions", p.string());
+  };
+  struct stat sb;
+
+  // Okay to follow symlink to existing directory owned by user
+  if (Fd e{openat(dirfd, p.c_str(), O_RDONLY | O_CLOEXEC)}) {
+    if (fstat(*e, &sb))
+      syserr("fstat({})", p.string());
+    check(sb);
+    return e;
+  }
+  if (errno != ENOENT)
+    syserr("open({})", p.string());
+
+  if (mkdirat(dirfd, p.c_str(), 0755))
+    syserr("mkdir({})", p.string());
+  Defer cleanup([dirfd, &p] { unlinkat(dirfd, p.c_str(), AT_REMOVEDIR); });
+
+  Fd d{openat(dirfd, p.c_str(),
+              O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW)};
+  if (!d)
+    syserr("open({})", p.string());
+
+  // To void TOCTTOU bugs, make sure newly created directory is empty
+  // and owned by user.
+  if (!dir_empty(*d))
+    err("mkudir: newly created directory {} not empty", p.string());
+  if (fstat(*d, &sb))
+    syserr("fstat({})", p.string());
+  check(sb);
+
+  cleanup.release();
+  return d;
 }
 
 int
