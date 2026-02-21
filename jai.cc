@@ -8,11 +8,14 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <pwd.h>
+#include <sched.h>
+#include <sys/file.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 using std::filesystem::path;
@@ -43,11 +46,11 @@ struct Fd {
 
   int operator*() const noexcept { return fd_; }
   explicit operator bool() const { return fd_ >= 0; }
-  void reset() noexcept
+  void reset(int fd = -1) noexcept
   {
     if (*this) {
       close(fd_);
-      fd_ = -1;
+      fd_ = fd;
     }
   }
 };
@@ -74,21 +77,25 @@ struct Defer {
 };
 
 struct Config {
-  std::string user;
-  uid_t uid = -1;
-  gid_t gid = -1;
-  path home;
-  Fd homefd;
-  Fd changesfd;
-  Fd workfd;
-  Fd jaifd;
+  std::string user_;
+  uid_t uid_ = -1;
+  gid_t gid_ = -1;
+  path homepath_;
+  Fd homefd_;
+  Fd jaifd_;
 
   void init();
   Fd makemount();
-  void makens(Fd root);
+  Fd makens();
 
   [[nodiscard]] Defer asuser();
   Fd mkudir(int dirfd, path p, mode_t mode = 0755);
+  int jaifd()
+  {
+    if (!jaifd_)
+      jaifd_ = mkudir(*homefd_, ".jai");
+    return *jaifd_;
+  }
 };
 
 template<typename... Args>
@@ -159,12 +166,12 @@ Config::init()
       err("cannot find password entry for user {}", envuser);
   }
   else if (getpwuid_r(realuid, &pwbuf, buf, sizeof(buf), &pw))
-    err("cannot find password entry for uid {}", uid);
+    err("cannot find password entry for uid {}", uid_);
 
-  user = pw->pw_name;
-  uid = pw->pw_uid;
-  gid = pw->pw_gid;
-  home = pw->pw_dir;
+  user_ = pw->pw_name;
+  uid_ = pw->pw_uid;
+  gid_ = pw->pw_gid;
+  homepath_ = pw->pw_dir;
 
   // Paranoia about ptrace, because we will drop privileges to access
   // the file system as the user.
@@ -172,16 +179,16 @@ Config::init()
 
   // Set all user permissions except user ID so we can easily drop
   // privileges in asuser.
-  if (realuid == 0 && uid != 0) {
-    if (initgroups(user.c_str(), gid))
+  if (realuid == 0 && uid_ != 0) {
+    if (initgroups(user_.c_str(), gid_))
       syserr("initgroups");
-    if (setgid(gid))
+    if (setgid(gid_))
       syserr("setgid");
   }
 
   auto cleanup = asuser();
-  if (!(homefd = open(home.c_str(), O_PATH | O_CLOEXEC)))
-    syserr("{}", home.string());
+  if (!(homefd_ = open(homepath_.c_str(), O_PATH | O_CLOEXEC)))
+    syserr("{}", homepath_.string());
 }
 
 Fd
@@ -208,30 +215,97 @@ Config::makemount()
     syserr("fsconfig(mode)");
   if (fsconfig(*tmp, FSCONFIG_CMD_CREATE, NULL, NULL, 0))
     syserr("fsconfig(CREATE)");
-
-  for (const char *t : {"/tmp", "/var/tmp"}) {
-    Fd mnt(fsmount(*tmp, FSMOUNT_CLOEXEC, 0));
-    if (!mnt)
-      syserr("fsmount(tmp)");
-    if (move_mount(*mnt, "", -1, t, MOVE_MOUNT_F_EMPTY_PATH))
-      syserr("move_mount");
-  }
+  Fd mnt(fsmount(*tmp, FSMOUNT_CLOEXEC, 0));
+  if (!mnt)
+    syserr("fsmount(tmp)");
+  if (move_mount(*mnt, "", *root, "tmp", MOVE_MOUNT_F_EMPTY_PATH))
+    syserr(R"(move_mount("/tmp"))");
+  mnt.reset(open_tree(*root, "tmp", OPEN_TREE_CLONE));
+  if (!mnt)
+    syserr(R"(open_tree("/mnt/tmp"))");
+  if (move_mount(*mnt, "", *root, "var/tmp", MOVE_MOUNT_F_EMPTY_PATH))
+    syserr(R"(move_mount("/var/tmp"))");
 
   return root;
 }
 
-void
-Config::makens(Fd root)
+Fd
+Config::makens()
 {
+  // Allocate a stack for clone, make sure we reap before freeing it.
+  constexpr size_t stack_size = 0x10'0000;
+  int pid = -1;
+  char *const stack = reinterpret_cast<char *>(malloc(stack_size));
+  Defer reap([&pid, stack] {
+    if (pid > 0)
+      while (waitpid(pid, nullptr, 0) == -1 && errno == EINTR)
+        ;
+    free(stack);
+  });
+
+  int pipefds[2];
+  if (pipe(pipefds))
+    syserr("pipe");
+
+  pid = clone(
+      +[](void *pipefds) -> int {
+        auto *fds = reinterpret_cast<int *>(pipefds);
+        close(fds[1]);
+        char c;
+        while (read(fds[0], &c, 1) > 0)
+          ;
+        return 0;
+      },
+      stack + stack_size, CLONE_NEWNS | SIGCHLD, pipefds);
+  int saved_errno = errno;
+
+  close(pipefds[0]);
+  Fd child_block(pipefds[1]);
+
+  if (pid == -1) {
+    errno = saved_errno;
+    syserr("clone");
+  }
+
+  path child_mnt(std::format("/proc/{}/ns/mnt", pid));
+  Fd nsmount(
+      open_tree(-1, child_mnt.c_str(), OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC));
+  if (!nsmount)
+    syserr(R"(open_tree("{}"))", child_mnt.string());
+
+  auto restore = asuser();
+  Fd target(openat(jaifd(), ".", O_TMPFILE | O_RDWR | O_CLOEXEC, 0600));
+  if (!target)
+    syserr("openat TMPFILE");
+  if (flock(*target, LOCK_EX | LOCK_NB))
+    syserr("flock TMPFILE");
+  if (linkat(*target, "", jaifd(), "mnt", AT_EMPTY_PATH)) {
+    if (errno == EEXIST)
+      return {};
+    syserr(R"(linkat(TMPFILE, "{}/.jai/mnt"))", homepath_.string());
+  }
+  restore.reset();
+
+  // This won't work unless jaifd()/mnt is on an MS_PRIVATE mount
+  if (move_mount(AT_FDCWD, child_mnt.c_str(), jaifd(), "mnt", 0)) {
+    saved_errno = errno;
+    auto x = std::format("id; ls -al {}", child_mnt.string());
+    system(x.c_str());
+    errno = saved_errno;
+    syserr(R"(move_mount("{}", "{}/.jai/mnt"))", child_mnt.string(),
+           homepath_.string());
+  }
+
+  return target;
 }
 
 Defer
 Config::asuser()
 {
-  if (!uid || geteuid())
+  if (!uid_ || geteuid())
     // If target is root or already dropped privileges, do nothing
     return {};
-  if (seteuid(uid))
+  if (seteuid(uid_))
     syserr("seteuid");
   return Defer{[] { seteuid(0); }};
 }
@@ -243,8 +317,8 @@ Config::mkudir(int dirfd, path p, mode_t mode)
   auto check = [this, &p](const struct stat &sb) {
     if (!S_ISDIR(sb.st_mode))
       err("{}: expected a directory", p.string());
-    if (sb.st_uid != uid)
-      err("{}: expected a directory owned by {}", p.string(), user);
+    if (sb.st_uid != uid_)
+      err("{}: expected a directory owned by {}", p.string(), user_);
     if ((sb.st_mode & 0700) != 0700)
       err("{}: expected a directory with owner rwx permissions", p.string());
   };
@@ -286,4 +360,8 @@ main(int argc, char **argv)
 {
   if (argc > 0)
     prog = argv[0];
+
+  Config conf;
+  conf.init();
+  conf.makens();
 }
