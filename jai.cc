@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <grp.h>
 #include <pwd.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -78,11 +79,16 @@ struct Config {
   gid_t gid = -1;
   path home;
   Fd homefd;
+  Fd changesfd;
+  Fd workfd;
   Fd jaifd;
 
   void init();
+  Fd makemount();
+  void makens(Fd root);
+
   [[nodiscard]] Defer asuser();
-  Fd mkudir(int dirfd, path p);
+  Fd mkudir(int dirfd, path p, mode_t mode = 0755);
 };
 
 template<typename... Args>
@@ -178,6 +184,47 @@ Config::init()
     syserr("{}", home.string());
 }
 
+Fd
+Config::makemount()
+{
+  Fd root(
+      open_tree(-1, "/", OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE));
+  if (!root)
+    syserr("open_tree(\"/\")");
+  struct mount_attr ro_private = {
+      .attr_set = MOUNT_ATTR_RDONLY,
+      .propagation = MS_PRIVATE,
+  };
+  if (mount_setattr(*root, "", AT_EMPTY_PATH | AT_RECURSIVE, &ro_private,
+                    sizeof(ro_private)) < 0)
+    syserr("mount_setattr(root)");
+
+  Fd tmp(fsopen("tmpfs", FSOPEN_CLOEXEC));
+  if (!tmp)
+    syserr("fsopen(tmpfs)");
+  if (fsconfig(*tmp, FSCONFIG_SET_STRING, "size", "10%", 0))
+    syserr("fsconfig(size)");
+  if (fsconfig(*tmp, FSCONFIG_SET_STRING, "mode", "01777", 0))
+    syserr("fsconfig(mode)");
+  if (fsconfig(*tmp, FSCONFIG_CMD_CREATE, NULL, NULL, 0))
+    syserr("fsconfig(CREATE)");
+
+  for (const char *t : {"/tmp", "/var/tmp"}) {
+    Fd mnt(fsmount(*tmp, FSMOUNT_CLOEXEC, 0));
+    if (!mnt)
+      syserr("fsmount(tmp)");
+    if (move_mount(*mnt, "", -1, t, MOVE_MOUNT_F_EMPTY_PATH))
+      syserr("move_mount");
+  }
+
+  return root;
+}
+
+void
+Config::makens(Fd root)
+{
+}
+
 Defer
 Config::asuser()
 {
@@ -190,7 +237,7 @@ Config::asuser()
 }
 
 Fd
-Config::mkudir(int dirfd, path p)
+Config::mkudir(int dirfd, path p, mode_t mode)
 {
   auto restore = asuser();
   auto check = [this, &p](const struct stat &sb) {
@@ -213,7 +260,7 @@ Config::mkudir(int dirfd, path p)
   if (errno != ENOENT)
     syserr("open({})", p.string());
 
-  if (mkdirat(dirfd, p.c_str(), 0755))
+  if (mkdirat(dirfd, p.c_str(), mode))
     syserr("mkdir({})", p.string());
   Defer cleanup([dirfd, &p] { unlinkat(dirfd, p.c_str(), AT_REMOVEDIR); });
 
