@@ -1,3 +1,7 @@
+*.o
 *~
 .*~
-jai
+/.cache
+/jai
+/jai.1
+compile_commands.json

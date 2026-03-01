@@ -377,6 +377,9 @@ Config::run(int nsfd, const path &cwd, char **argv)
     syserr("setuid");
   if (chdir(cwd.c_str()))
     syserr("chdir({})", cwd.string());
+  for (auto var :
+       {"SSH_AUTH_SOCK", "SSH_AGENT_PID", "GITHUB_TOKEN", "IPMI_PASSWORD"})
+    unsetenv(var);
   execvp(argv[0], argv);
   perror(argv[0]);
   _exit(1);
