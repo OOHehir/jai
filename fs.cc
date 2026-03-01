@@ -151,7 +151,7 @@ is_dir_empty(int dirfd)
 
 Fd
 ensure_dir(int dfd, const path &p, mode_t perm, FollowLinks follow,
-           bool okay_if_not_root)
+           bool okay_if_other_owner)
 {
   assert(!p.empty());
 
@@ -175,9 +175,14 @@ ensure_dir(int dfd, const path &p, mode_t perm, FollowLinks follow,
   struct stat sb;
   if (fstat(*fd, &sb))
     syserr(R"(fstat("{}"))", p.string());
-  if (!okay_if_not_root)
-    if (auto euid = geteuid(); sb.st_uid != euid)
+  if (!okay_if_other_owner) {
+    auto euid = geteuid();
+    if (sb.st_uid != euid)
       err("{}: has uid {} should have {}", p.string(), sb.st_uid, euid);
+    // Because we run with a weird gid
+    if (!euid && sb.st_gid)
+      fchown(*fd, -1, 0);
+  }
   if (auto m = sb.st_mode & perm; m != (sb.st_mode & 07777) && fchmod(*fd, m))
     syserr(R"(fchmod("{}", {:o}))", p.string(), m);
   return fd;

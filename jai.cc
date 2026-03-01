@@ -36,6 +36,13 @@ struct Config {
   Fd run_jai_user_fd_;
 
   void init();
+  void reset()
+  {
+    home_fd_.reset();
+    home_jai_fd_.reset();
+    run_jai_fd_.reset();
+    run_jai_user_fd_.reset();
+  }
 
   Fd make_ns();
   int make_ns_child();
@@ -53,41 +60,24 @@ struct Config {
   Fd make_private_tmp();
 };
 
-struct LockOrMountpoint {
-  bool is_mp;
-  Fd fd;
-  Defer cleanup;
-};
-
-// XXX - This needs a predicate so we don't get stuck with
-// half-constructed mountpoints.
-static LockOrMountpoint
-lock_or_mountpoint(int dfd, const path &file, path lockfile = {},
-                   bool fileok = false)
+static std::expected<Fd, Defer>
+lock_or_validate_file(int dfd, const path &file, int flags, auto &&validate)
+    requires requires {
+      { validate(1) } -> std::convertible_to<bool>;
+    }
 {
-  if (lockfile.empty()) {
-    assert(!file.empty());
-    lockfile = file;
-    lockfile += ".lock";
-  }
-  Fd lock;
-  for (;;) {
-    int flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC;
-    if (!fileok)
-      flags |= O_DIRECTORY;
-    if (Fd fd = openat(dfd, file.c_str(), flags); fd && is_mountpoint(*fd))
-      return LockOrMountpoint{.is_mp = true, .fd = std::move(fd)};
+  assert(!file.empty());
+  path lockfile = cat(file, ".lock");
+  flags |= O_NOFOLLOW | O_CLOEXEC;
+
+  return lock_or_validate(dfd, lockfile, [&] -> Fd {
+    if (Fd fd = openat(dfd, file.c_str(), flags); fd && validate(*fd))
+      return fd;
     else if (!fd && errno != ENOENT)
       syserr(R"(openat("{}", "{}", {}))", fdpath(dfd), file.string(),
              open_flags_to_string(flags));
-    if (lock)
-      return LockOrMountpoint{
-          .is_mp = false,
-          .fd = std::move(lock),
-          .cleanup{[dfd, lockfile] { unlinkat(dfd, lockfile.c_str(), 0); }},
-      };
-    lock = open_lockfile(dfd, lockfile);
-  }
+    return {};
+  });
 }
 
 void
@@ -160,21 +150,19 @@ Config::run_jai()
   if (run_jai_fd_)
     return *run_jai_fd_;
 
-  LockOrMountpoint lom;
-  for (;;) {
-    lom = lock_or_mountpoint(-1, kRunRoot);
-    if (!lom.is_mp)
-      break;
-    if (xfstat(*lom.fd).st_mode & 0777)
-      return *(run_jai_fd_ = std::move(lom.fd));
-  }
+  auto r = lock_or_validate_file(-1, kRunRoot, O_RDONLY, [](int fd) {
+    return is_mountpoint(fd) && (xfstat(fd).st_mode & 0777);
+  });
+  if (r)
+    return *(run_jai_fd_ = std::move(*r));
 
   // Get rid of any partially set up directories
   recursive_umount(kRunRoot);
 
-  xmnt_move(*make_tmpfs("size", "64M", "mode", "0755", "gid", "0"),
+  xmnt_move(*make_tmpfs("size", "64M", "mode", "0", "gid", "0"),
             *ensure_dir(-1, kRunRoot, 0755, kFollow));
-  Fd dirfd = ensure_dir(-1, kRunRoot, 0, kFollow);
+
+  Fd dirfd = xopenat(-1, kRunRoot, O_RDONLY | O_DIRECTORY);
   xmnt_propagate(*dirfd, MS_PRIVATE);
   fchmod(*dirfd, 0755);
   return *(run_jai_fd_ = std::move(dirfd));
@@ -299,9 +287,11 @@ Config::make_private_tmp()
 Fd
 Config::make_ns()
 {
-  auto lom = lock_or_mountpoint(run_jai_user(), "ns", "ns.lock", true);
-  if (lom.is_mp)
-    return std::move(lom.fd);
+  auto r = lock_or_validate_file(run_jai_user(), "ns", O_RDWR,
+                                 [](int fd) { return is_mountpoint(fd); });
+  if (r)
+    return std::move(*r);
+
   make_home_overlay();
   make_private_tmp();
 
@@ -360,6 +350,7 @@ Config::make_ns()
 int
 Config::make_ns_child()
 {
+  reset();
   const path mnt = "/mnt";
   const path mrj = mnt / path{kRunRoot}.relative_path();
   auto oldroot = xopenat(-1, "/", O_PATH);

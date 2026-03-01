@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <concepts>
+#include <expected>
 #include <filesystem>
 #include <format>
 #include <functional>
@@ -52,7 +53,7 @@ template<auto Destroy, typename T = ArgType<Destroy>, auto Empty = T{}>
 struct RaiiHelper {
   T t_ = Empty;
 
-  RaiiHelper() noexcept = default;
+  constexpr RaiiHelper() noexcept = default;
   RaiiHelper(T t) noexcept : t_(std::move(t)) {}
   RaiiHelper(RaiiHelper &&other) noexcept : t_(other.release()) {}
   ~RaiiHelper() { reset(); }
@@ -114,6 +115,12 @@ using Defer = RaiiHelper<detail::NullaryInvoker{},
                          std::move_only_function<void()>, nullptr>;
 
 using std::filesystem::path;
+
+inline path
+cat(path left, const path &right)
+{
+  return left += right;
+}
 
 // Compare paths component by component so subtrees are contiguous
 struct PathLess {
@@ -204,7 +211,7 @@ bool is_fd_at_path(int targetfd, int dfd, const path &file,
 bool is_dir_empty(int dirfd);
 
 Fd ensure_dir(int dfd, const path &p, mode_t perm, FollowLinks follow,
-              bool okay_if_not_root = false);
+              bool okay_if_other_owner = false);
 
 bool is_mountpoint(int dfd, const path &file = {},
                    FollowLinks follow = kNoFollow);
@@ -212,6 +219,47 @@ bool is_mountpoint(int dfd, const path &file = {},
 // Open an exclusive lockfile to guard one-time setup.  Might fail, in
 // which case re-check the need for setup and try again.
 Fd open_lockfile(int dfd, const path &file);
+
+// If validate(get()) returns the result of get() in the expected
+// value.  Otherwise, acquires the lock and returns an error value
+// containing a Defer object that releases the lock.
+//
+// Be careful not to destroy the return value.  This would be bad:
+//
+//    if (auto r = lock_or_validate(...); r)
+//      return std::move(*r);
+//    // now you no longer have the lock
+//
+// Instead you want:
+//
+//    auto r = lock_or_validate(...);
+//    if (r)
+//      return std::move(*r);
+//    // now you no longer have the lock
+template<typename Get,
+         typename Validate = decltype([](auto &&v) { return bool(v); })>
+std::expected<std::decay_t<std::invoke_result_t<Get>>, Defer>
+lock_or_validate(int dfd, path lockfile, Get get, Validate validate = {})
+    requires requires {
+      { validate(get()) } -> std::convertible_to<bool>;
+    }
+{
+  std::expected<std::decay_t<std::invoke_result_t<Get>>, Defer> ret =
+      std::unexpected{Defer{}};
+
+  Fd lock;
+  for (;;) {
+    if (validate(ret.emplace(get())))
+      return ret;
+    if (lock) {
+      ret = std::unexpected{Defer{[lock = std::move(lock), dfd, lockfile] {
+        unlinkat(dfd, lockfile.c_str(), 0);
+      }}};
+      return ret;
+    }
+    lock = open_lockfile(dfd, lockfile);
+  }
+}
 
 std::string open_flags_to_string(int flags);
 
