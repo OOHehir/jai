@@ -152,9 +152,10 @@ Config::run_jai()
   if (run_jai_fd_)
     return *run_jai_fd_;
 
-  auto r = lock_or_validate_file(-1, kRunRoot, O_RDONLY, [](int fd) {
-    return is_mountpoint(fd) && (xfstat(fd).st_mode & 0777);
-  });
+  auto r =
+      lock_or_validate_file(-1, kRunRoot, O_RDONLY | O_DIRECTORY, [](int fd) {
+        return is_mountpoint(fd) && (xfstat(fd).st_mode & 0777);
+      });
   if (r)
     return *(run_jai_fd_ = std::move(*r));
 
@@ -289,7 +290,7 @@ Config::make_private_tmp()
 Fd
 Config::make_ns()
 {
-  auto r = lock_or_validate_file(run_jai_user(), "ns", O_RDWR,
+  auto r = lock_or_validate_file(run_jai_user(), "ns", O_RDONLY,
                                  [](int fd) { return is_mountpoint(fd); });
   if (r)
     return std::move(*r);
@@ -468,7 +469,7 @@ main(int argc, char **argv)
   };
 
 #if 1
-  go();                         // make exceptions crash
+  go(); // make exceptions crash
 #else
   try {
     go();
