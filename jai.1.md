@@ -72,7 +72,10 @@ into your home directory, and restart `jai`.
   exported.
 
 `-u`
-: Removes the sandboxed home directory from `/run/jai`.
+: Removes the sandboxed home directory from `/run/jai`.  This also
+  destroys the private `/tmp` and `/var/tmp` directory (same directory
+  at both mount points), so make sure you don't need anything in
+  there.
 
 # ENVIRONMENT
 
