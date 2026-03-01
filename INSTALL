@@ -2,5 +2,18 @@
 This software only runs on modern versions of linux.  It makes
 extensive use of non-portable file system namespace facilities.
 
-To compile it just run make.  To install it, either make it setuid
-root in /usr/local/bin/jai, or execute it with sudo.
+To build the software, run:
+
+    make
+
+To install it, run one of the following:
+
+    # To install in the default location of /usr/local/bin
+    make install
+
+    # To override the default location and install in /usr
+    make install PREFIX=/usr
+
+    # To package the files
+    fakeroot sh -c 'make install DESTDIR=pkg PREFIX=/usr && \
+                    tar -czf jai.`uname -m`.tgz -C pkg .'

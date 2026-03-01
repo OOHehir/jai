@@ -1,4 +1,7 @@
 
+DESTDIR=
+PREFIX=/usr/local
+
 all: jai
 
 CXX ?= c++
@@ -22,7 +25,14 @@ jai.1: jai.1.md
 	-pandoc -s -w man jai.1.md -o jai.1
 	@touch jai.1
 
+install: all
+	install -D -o root -m 04511 -t $(DESTDIR)$(PREFIX)/bin jai
+	install -D -t $(DESTDIR)$(PREFIX)/share/man jai.1
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/jai $(DESTDIR)$(PREFIX)/share/man/jai.1
+
 clean:
 	rm -f jai *~ *.o
 
-.PHONY: all clean
+.PHONY: all clean install uninstall
