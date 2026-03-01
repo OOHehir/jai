@@ -1,4 +1,4 @@
-# JAI - An ultra light-weight jail for AI CLIs on linux
+# JAI - An ultra lightweight jail for AI CLIs on linux
 
 `jai` strives to be the easiest container in the world to configure,
 so easy that you never again need to run a code assistant without

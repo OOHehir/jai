@@ -14,8 +14,8 @@ jai - Jail an AI agent
 
 # DESCRIPTION
 
-`jai` is a super light-weight sandbox for AI agents requiring almost
-no configuration.  It provides only casual security, so is not a
+`jai` is a super lightweight sandbox for AI agents requiring almost no
+configuration.  It provides only casual security, so is not a
 substitute for using a proper container to confine agents.  However it
 is a great alternative to using no protection when you are thinking of
 giving an agent full control of your account and all its files.
