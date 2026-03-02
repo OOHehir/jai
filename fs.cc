@@ -186,9 +186,7 @@ ensure_dir(int dfd, const path &p, mode_t perm, FollowLinks follow,
     // Don't advance iterator; want to open directory we just created
   }
 
-  struct stat sb;
-  if (fstat(*fd, &sb))
-    syserr(R"(fstat("{}"))", p.string());
+  auto sb = xfstat(*fd);
   if (!okay_if_other_owner) {
     auto euid = geteuid();
     if (sb.st_uid != euid)
@@ -230,7 +228,7 @@ open_lockfile(int dfd, const path &file)
         // expect the invoker to call again if setup isn't complete.
         fd.reset();
       else if (!S_ISREG(sb.st_mode))
-        err("{}: expected regular file", file.string());
+        err("{}/{}: expected regular file", fdpath(dfd), file.string());
       return fd;
     }
     if (errno != EWOULDBLOCK && errno != EINTR)

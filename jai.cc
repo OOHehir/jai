@@ -174,7 +174,7 @@ Config::run_jai()
   xmnt_move(*make_tmpfs("run-jai", "size", "64M", "mode", "0", "gid", "0"),
             *ensure_dir(-1, kRunRoot, 0755, kFollow));
 
-  Fd dirfd = xopenat(-1, kRunRoot, O_RDONLY | O_DIRECTORY);
+  Fd dirfd = xopenat(-1, kRunRoot, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   xmnt_propagate(*dirfd, MS_PRIVATE);
   fchmod(*dirfd, 0755);
   return *(run_jai_fd_ = std::move(dirfd));
@@ -304,13 +304,13 @@ Config::make_private_tmp()
     return tmp;
   xmnt_move(*make_tmpfs("jai-tmp", "gid", "0", "mode", "01777", "size", "40%"),
             *tmp);
-  return xopenat(run_jai_user(), "tmp", O_RDONLY | O_NOFOLLOW);
+  return xopenat(run_jai_user(), "tmp", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
 }
 
 Fd
 Config::make_ns(const std::vector<path> &dirs)
 {
-  Fd oldns = xopenat(-1, "/proc/self/ns/mnt", O_RDONLY);
+  Fd oldns = xopenat(-1, "/proc/self/ns/mnt", O_RDONLY | O_CLOEXEC);
   Defer restore{[fd = *oldns] {
     if (setns(fd, CLONE_NEWNS)) {
       std::println("setns(CLONE_NEWNS): {}", strerror(errno));
@@ -329,7 +329,7 @@ Config::make_ns(const std::vector<path> &dirs)
 
   if (unshare(CLONE_NEWNS))
     syserr("unshare(CLONE_NEWNS)");
-  Fd newns = xopenat(-1, "/proc/self/ns/mnt", O_RDONLY);
+  Fd newns = xopenat(-1, "/proc/self/ns/mnt", O_RDONLY | O_CLOEXEC);
   xmnt_setattr(-1, "/",
                mount_attr{
                    .attr_set = MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID,
@@ -349,21 +349,16 @@ Config::make_ns(const std::vector<path> &dirs)
       d = "/" / d;
     if (setns(*oldns, CLONE_NEWNS))
       syserr("setns(CLONE_NEWNS)");
-    Fd src = clone_tree(*xopenat(-1, d, O_DIRECTORY | O_PATH));
+    Fd src = clone_tree(*xopenat(-1, d, O_DIRECTORY | O_PATH | O_CLOEXEC));
     check_user(*src);
     xmnt_setattr(*src, attr);
     if (setns(*newns, CLONE_NEWNS))
       syserr("setns(CLONE_NEWNS)");
-    Fd dst = xopenat(-1, d, O_DIRECTORY | O_PATH);
+    Fd dst = xopenat(-1, d, O_DIRECTORY | O_PATH | O_CLOEXEC);
     check_user(*dst);
     xmnt_move(*src, *dst);
   }
 
-#if 0
-  restore.reset();
-  xmnt_move(*clone_tree(*newns),
-            *xopenat(run_jai_user(), "ns", O_CREAT | O_RDWR, 0600));
-#endif
   return newns;
 }
 
@@ -447,6 +442,7 @@ Config::run(int nsfd, const path &cwd, char **argv)
   if (auto pid = fork(); pid < 0)
     syserr("fork");
   else if (pid != 0) {
+    close(nsfd);
     int status;
     while (waitpid(pid, &status, 0) == -1 && errno == EINTR)
       ;
