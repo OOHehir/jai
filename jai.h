@@ -161,6 +161,9 @@ std::string fdpath(int fd, bool must = false);
 
 PathSet mountpoints(const path &mountinfo = "/proc/self/mountinfo");
 
+// source (if non-NULL) is the source printed in /proc/self/mountinfo
+Fd xfsopen(const char *fsname, const char *source = nullptr);
+
 // Calls fsconfig(FSCONFIG_CMD_CREATE) and fsmount.
 Fd make_mount(int conffd, int attr = MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV);
 
@@ -188,11 +191,9 @@ void xmnt_propagate(int fd, std::uint64_t propagation, bool recursive = true);
 template<std::convertible_to<const char *>... Opt>
 requires (sizeof...(Opt) % 2 == 0)
 Fd
-make_tmpfs(Opt... opt)
+make_tmpfs(const char *source, Opt... opt)
 {
-  Fd conf = fsopen("tmpfs", FSOPEN_CLOEXEC);
-  if (!conf)
-    syserr(R"(fsopen("tmpfs"))");
+  Fd conf = xfsopen("tmpfs", source);
   if constexpr (sizeof...(Opt)) {
     auto options = std::to_array<const char *>({opt...});
     for (auto i = 0uz; i < options.size() - 1; i += 2)

@@ -171,7 +171,7 @@ Config::run_jai()
   // Get rid of any partially set up directories
   recursive_umount(kRunRoot);
 
-  xmnt_move(*make_tmpfs("size", "64M", "mode", "0", "gid", "0"),
+  xmnt_move(*make_tmpfs("run-jai", "size", "64M", "mode", "0", "gid", "0"),
             *ensure_dir(-1, kRunRoot, 0755, kFollow));
 
   Fd dirfd = xopenat(-1, kRunRoot, O_RDONLY | O_DIRECTORY);
@@ -278,9 +278,7 @@ Config::make_home_overlay()
   check_user(*work);
   restore.reset();
 
-  Fd fsfd = fsopen("overlay", FSOPEN_CLOEXEC);
-  if (!fsfd)
-    syserr(R"(fsopen("overlay"))");
+  Fd fsfd = xfsopen("overlay", "jai-home");
   if (fsconfig(*fsfd, FSCONFIG_SET_FD, "lowerdir+", nullptr, home()) ||
       fsconfig(*fsfd, FSCONFIG_SET_FD, "upperdir", nullptr, *changes) ||
       fsconfig(*fsfd, FSCONFIG_SET_FD, "workdir", nullptr, *work))
@@ -304,7 +302,8 @@ Config::make_private_tmp()
   Fd tmp = ensure_dir(run_jai_user(), "tmp", 0755, kFollow);
   if (is_mountpoint(*tmp))
     return tmp;
-  xmnt_move(*make_tmpfs("gid", "0", "mode", "01777", "size", "40%"), *tmp);
+  xmnt_move(*make_tmpfs("jai-tmp", "gid", "0", "mode", "01777", "size", "40%"),
+            *tmp);
   return xopenat(run_jai_user(), "tmp", O_RDONLY | O_NOFOLLOW);
 }
 
@@ -444,6 +443,7 @@ Config::run(int nsfd, const path &cwd, char **argv)
     syserr("setns(CLONE_NEWNS)");
   if (unshare(CLONE_NEWPID))
     syserr("unshare(CLONE_NEWPID)");
+
   if (auto pid = fork(); pid < 0)
     syserr("fork");
   else if (pid != 0) {
@@ -456,6 +456,19 @@ Config::run(int nsfd, const path &cwd, char **argv)
       signal(WTERMSIG(status), SIG_DFL);
       raise(WTERMSIG(status));
     }
+    _exit(1);
+  }
+
+  try {
+    recursive_umount("/proc");
+    Fd conf = xfsopen("proc", "proc");
+    if (!conf)
+      syserr(R"(fsopen("proc"))");
+    xmnt_move(*make_mount(*conf, MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV |
+                                     MOUNT_ATTR_NOEXEC),
+              -1, "/proc");
+  } catch (const std::exception &e) {
+    std::println(stderr, "{}: {}", prog.filename().string(), e.what());
     _exit(1);
   }
 
@@ -520,8 +533,25 @@ do_main(int argc, char **argv)
     conf.unmount();
     return;
   }
-  if (!opt_D && !std::ranges::contains(opt_d, cwd))
+  if (!opt_D && !std::ranges::contains(opt_d, cwd)) {
+    if (!cmd.empty() && cwd == canonical(conf.homepath_)) {
+      std::string name = prog.filename().string();
+      std::string cmdstr;
+      for (const auto &arg : cmd) {
+        if (!cmdstr.empty())
+          cmdstr += ' ';
+        cmdstr += arg;
+      }
+      std::println(
+          R"({0}: Refusing to expose your entire home directory to sandbox.  Did
+{1:>{2}}  you forget to specify the -D option?  If you really want to grant
+{1:>{2}}  permissions on your entire home directory, run
+{1:>{2}}    jai -Dd {3} {4})",
+          name, "", name.size(), conf.homepath_.string(), cmdstr);
+      exit(1);
+    }
     opt_d.emplace_back(cwd);
+  }
 
   auto fd = conf.make_ns(opt_d);
   if (!cmd.empty()) {

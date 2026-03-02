@@ -52,6 +52,18 @@ mountpoints(const path &mountinfo)
 }
 
 Fd
+xfsopen(const char *fsname, const char *source)
+{
+  Fd fd = fsopen(fsname, FSOPEN_CLOEXEC);
+  if (!fd)
+    syserr(R"(fsopen("{}")", fsname);
+  if (source && fsconfig(*fd, FSCONFIG_SET_STRING, "source", source, 0))
+    syserr(R"(fsconfig({}, FSCONFIG_SET_STRING, "source", "{}", 0))", fsname,
+           source);
+  return fd;
+}
+
+Fd
 make_mount(int conffd, int attr)
 {
   if (fsconfig(conffd, FSCONFIG_CMD_CREATE, nullptr, nullptr, 0))
