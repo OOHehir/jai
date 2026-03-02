@@ -58,7 +58,8 @@ struct RaiiHelper {
   RaiiHelper(RaiiHelper &&other) noexcept : t_(other.release()) {}
   ~RaiiHelper() { reset(); }
 
-  template<is_one_of<T, decltype(Empty)> Arg>
+  template<typename Arg>
+  requires is_one_of<std::decay_t<Arg>, T, decltype(Empty)>
   RaiiHelper &operator=(Arg &&arg) noexcept
   {
     reset(std::forward<Arg>(arg));
@@ -75,9 +76,9 @@ struct RaiiHelper {
 
   // For legacy libraries that want a T**, return that type for &
   template<std::same_as<T> U = T> requires std::is_pointer_v<U>
-  auto operator&(this auto &&self) noexcept
+  auto operator&() noexcept
   {
-    return &self.t_;
+    return std::addressof(t_);
   }
   // Make it easier to use RaiiHelper with pointers in C libraries
   template<std::same_as<T> U = T> requires std::is_pointer_v<U>
@@ -89,7 +90,8 @@ struct RaiiHelper {
 
   T release() noexcept { return std::exchange(t_, Empty); }
 
-  template<is_one_of<T, decltype(Empty)> Arg>
+  template<typename Arg>
+  requires is_one_of<std::decay_t<Arg>, T, decltype(Empty)>
   void reset(Arg &&arg) noexcept(noexcept(Destroy(std::move(t_))))
   {
     if (auto destroy_me = std::exchange(t_, std::forward<Arg>(arg));
