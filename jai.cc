@@ -1,5 +1,6 @@
-#include "cred.h"
 #include "jai.h"
+#include "cred.h"
+#include "fs.h"
 
 #include <cassert>
 #include <cstring>
@@ -22,6 +23,7 @@
 
 path prog;
 
+constexpr const char *kUnstrustedUser = "jai";
 constexpr const char *kRunRoot = "/run/jai";
 constexpr const char *kSB = "sandboxed-home";
 
@@ -35,10 +37,10 @@ constexpr const char *kSB = "sandboxed-home";
 
 struct Config {
   std::string user_;
-  uid_t uid_ = -1;
-  gid_t gid_ = -1;
   path homepath_;
   path fake_home_;
+  Credentials user_cred_;
+  Credentials untrusted_cred_;
 
   Fd home_fd_;
   Fd home_jai_fd_;
@@ -51,7 +53,8 @@ struct Config {
   void exec(int nsfd, const path &cwd, char **argv);
   void unmount();
 
-  [[nodiscard]] Defer asuser();
+  [[nodiscard]] static Defer asuser(const Credentials *crp);
+  [[nodiscard]] Defer asuser() { return asuser(&user_cred_); }
   void check_user(int fd, std::string path_for_error = {});
   Fd ensure_udir(int dfd, const path &p, mode_t perm = 0700,
                  FollowLinks follow = kFollow)
@@ -71,20 +74,6 @@ struct Config {
   Fd make_home_overlay();
   Fd make_private_tmp();
 };
-
-PwEnt
-untrusted_user()
-{
-  if (PwEnt ret; ret.nam("jai")) {
-    if (ret->pw_uid && !strcmp(ret->pw_gecos, "JAI sandbox untrusted user") &&
-        !strcmp(ret->pw_dir, "/"))
-      return ret;
-    std::println(stderr,
-                 R"(Ignoring user jai because uid is 0, home dir is not "/" or
-GECOS field is not "JAI sandbox untrusted user")");
-  }
-  return {};
-}
 
 static std::expected<Fd, Defer>
 lock_or_validate_file(int dfd, const path &file, int flags, auto &&validate,
@@ -126,44 +115,53 @@ Config::init()
       err("cannot find password entry for user {}", envuser);
   }
   else if (!pw.id(realuid))
-    err("cannot find password entry for uid {}", uid_);
+    err("cannot find password entry for uid {}", realuid);
 
   user_ = pw->pw_name;
-  uid_ = pw->pw_uid;
-  gid_ = pw->pw_gid;
   homepath_ = pw->pw_dir;
+  untrusted_cred_ = user_cred_ = Credentials::get_user(pw);
+
+  if (PwEnt u; u.nam(kUnstrustedUser)) {
+    if (u->pw_uid && !strcmp(u->pw_gecos, "JAI sandbox untrusted user") &&
+        !strcmp(u->pw_dir, "/"))
+      untrusted_cred_ = Credentials::get_user(u);
+    else
+      std::println(stderr,
+                   R"(Ignoring user {} because uid is 0, home dir is not "/" or
+GECOS field is not "JAI sandbox untrusted user")",
+                   kUnstrustedUser);
+  }
+  else
+    std::println(stderr, R"(Could not find credentials for untrusted {} user.
+Try running "sudo systemd-sysusers".)",
+                 kUnstrustedUser);
 
   // Paranoia about ptrace, because we will drop privileges to access
   // the file system as the user.
   prctl(PR_SET_DUMPABLE, 0);
-
-  // Set all user permissions except user ID so we can easily drop
-  // privileges in asuser.
-  if (realuid == 0 && uid_ != 0) {
-    if (initgroups(user_.c_str(), gid_))
-      syserr("initgroups");
-    if (setgid(gid_))
-      syserr("setgid");
-  }
 }
 
 Defer
-Config::asuser()
+Config::asuser(const Credentials *crp)
 {
-  if (!uid_ || geteuid())
-    // If target is root or already dropped privileges, do nothing
+  if (!crp->uid_) // target is root, nothing to do
     return {};
-  if (seteuid(uid_))
-    syserr("seteuid");
-  return Defer{[] { seteuid(0); }};
+  auto old = Credentials::get_effective();
+  if (old.uid_) {
+    if (old.uid_ == crp->uid_) // we are already the target user
+      return {};
+    err("Config::asuser: want uid {} but already uid {}", crp->uid_, old.uid_);
+  }
+  crp->make_effective();
+  return Defer{[old = std::move(old)] { old.make_effective(); }};
 }
 
 void
 Config::check_user(int fd, std::string p)
 {
-  if (auto sb = xfstat(fd); sb.st_uid != uid_)
+  if (auto sb = xfstat(fd); sb.st_uid != user_cred_.uid_)
     err("{}: owned by {} should be owned by {}", p.empty() ? fdpath(fd) : p,
-        sb.st_uid, uid_);
+        sb.st_uid, user_cred_.uid_);
 }
 
 int
@@ -212,7 +210,8 @@ Config::run_jai_user()
   if (int r = acl_equiv_mode(acl, nullptr); r < 0)
     syserr("acl_equiv_mode");
   else if (r == 0) {
-    auto text = std::format("u::rwx,g::---,o::---,u:{}:r-x,m::r-x", uid_);
+    auto text =
+        std::format("u::rwx,g::---,o::---,u:{}:r-x,m::r-x", user_cred_.uid_);
     set_fd_acl(*dirfd, text.c_str(), kAclAccess);
   }
   return *(run_jai_user_fd_ = std::move(dirfd));
@@ -328,15 +327,10 @@ Config::make_private_tmp()
 Fd
 Config::make_idmap_ns()
 {
-  auto pw = untrusted_user();
-  if (!pw)
-    err("Could not find untrusted user jai for user map");
-
   pid_t pid{-1};
   Defer _reap([pid] {
     if (pid > 0) {
-      int status;
-      while (waitpid(pid, &status, 0) == -1 && errno == EINTR)
+      while (waitpid(pid, nullptr, 0) == -1 && errno == EINTR)
         ;
     }
   });
@@ -354,12 +348,12 @@ Config::make_idmap_ns()
   Fd newns = xopenat(-1, child / "ns/user", O_RDONLY);
 
   Fd mapctl = xopenat(-1, child / "gid_map", O_WRONLY);
-  auto map = make_id_map(gid_, pw->pw_gid);
+  auto map = make_id_map(user_cred_.gid_, untrusted_cred_.gid_);
   if (write(*mapctl, map.data(), map.size()) == -1)
     syserr("write(gid_map)");
 
   mapctl = xopenat(-1, child / "uid_map", O_WRONLY);
-  map = make_id_map(uid_, pw->pw_uid);
+  map = make_id_map(user_cred_.uid_, untrusted_cred_.uid_);
   if (write(*mapctl, map.data(), map.size()) == -1)
     syserr("write(uid_map)");
   mapctl.reset();
@@ -382,9 +376,11 @@ Config::make_mnt_ns(const std::vector<path> &dirs)
 
   Fd home;
   Fd mapns;
+  Credentials *sbcred = &user_cred_;
   if (fake_home_.empty())
     home = clone_tree(*make_home_overlay());
   else {
+    sbcred = &untrusted_cred_;
     mapns = make_idmap_ns();
     attr.attr_set |= MOUNT_ATTR_IDMAP;
     attr.userns_fd = *mapns;
@@ -420,13 +416,15 @@ Config::make_mnt_ns(const std::vector<path> &dirs)
     xmnt_setattr(*src, attr);
 
     xsetns(*newns, CLONE_NEWNS);
-    restore_root = asuser();
+    restore_root = asuser(sbcred);
     Fd dst;
-    if (fake_home_.empty())
+    if (fake_home_.empty()) {
       dst = xopenat(-1, d, O_DIRECTORY | O_PATH | O_CLOEXEC);
+      check_user(*dst, d);
+    }
     else
-      dst = ensure_udir(-1, d);
-    check_user(*dst, d);
+      // XXX - possible TOCTTOU?
+      dst = ensure_dir(-1, d, 0755, kNoFollow, true);
     restore_root.reset();
     xmnt_move(*src, *dst);
   }
@@ -536,8 +534,10 @@ Config::exec(int nsfd, const path &cwd, char **argv)
     _exit(1);
   }
 
-  if (setuid(uid_))
-    syserr("setuid");
+  if (fake_home_.empty())
+    user_cred_.make_real();
+  else
+    untrusted_cred_.make_real();
   if (chdir(cwd.c_str()))
     syserr("chdir({})", cwd.string());
   sanitize_env();

@@ -10,7 +10,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include "jai.h"
+#include "fs.h"
 
 std::string
 fdpath(int fd, bool must)

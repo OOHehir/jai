@@ -1,7 +1,20 @@
+# generated
 *.o
 *~
 .*~
-/.cache
+.cache
+/.deps
+/Makefile
+/Makefile.in
+/aclocal.m4
+/autom4te.cache/
+/config.log
+/config.status
+/configure
+/depcomp
+/install-sh
 /jai
+/jai-*.tar.gz
 /jai.1
+/missing
 compile_commands.json

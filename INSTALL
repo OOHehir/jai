@@ -7,18 +7,25 @@ To get the software, run:
     git clone github.com:stanford-scs/jai.git
     cd jai
 
-To build the software, run:
+To build from git, you will need autoconf and automake:
 
+    ./autogen.sh
+    ./configure
     make
 
-To install it, run one of the following:
+If building from a release tarball, autotools are not required:
 
-    # To install in the default location of /usr/local/bin
-    make && sudo make install
+    ./configure
+    make
 
-    # To override the default location and install in /usr
-    make && make install PREFIX=/usr
+To install (must be root for setuid):
 
-    # To package the files
-    fakeroot sh -c 'make install DESTDIR=pkg PREFIX=/usr && \
-                    tar -czf jai.`uname -m`.tgz -C pkg .'
+    sudo make install
+    sudo systemd-sysusers
+
+To override the installation prefix:
+
+    ./configure --prefix=/usr
+    make
+    sudo make install
+    sudo systemd-sysusers
