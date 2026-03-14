@@ -90,7 +90,7 @@ template<is_action F> struct ActionImpl : Action {
 template<typename F> ActionImpl(F) -> ActionImpl<F>;
 
 struct Option : std::string_view {
-  template<std::size_t N> requires (N >= 3)
+  template<size_t N> requires (N >= 3)
   consteval Option(const char (&str)[N]) : std::string_view(str, N - 1)
   {
     if (str[0] != '-' || (N == 3 && str[1] == '-'))
@@ -202,22 +202,65 @@ public:
   {
     return parse_cli(std::span{argv + 1, argv + argc});
   }
-  void parse_file(std::string_view contents)
+  void parse_file(std::string_view text)
   {
-    static constexpr std::string_view ws(" \t\r\n");
-    for (auto lineview : contents | std::views::split('\n')) {
-      auto line = std::string_view(lineview);
-      auto b1 = line.find_first_not_of(ws);
-      if (b1 == line.npos || line[b1] == '#')
+    static constexpr std::string_view ws = " \t\r";
+    static constexpr std::string_view wsnl = " \t\r\n";
+    const size_t sz = text.size();
+    auto clamp = [sz](size_t n) { return std::min(n, sz); };
+    for (size_t pos = 0; pos < sz;) {
+      if ((pos = text.find_first_not_of(wsnl, pos)) >= sz)
+        break;
+      if (text[pos] == '#') {
+        pos = text.find('\n', pos);
         continue;
-      auto e1 = std::min(line.find_first_of(ws, b1), line.size());
-      auto opt = std::format("--{}", line.substr(b1, e1 - b1));
-      if (auto b2 = line.find_first_not_of(ws, e1); b2 != line.npos) {
-        auto e2 = line.find_last_not_of(ws);
-        e2 = e2 == line.npos ? line.size() : e2 + 1;
-        opt += std::format("={}", line.substr(b2, e2 - b2));
       }
-      parse_cli(std::span{&opt, 1});
+      auto optend = clamp(text.find_first_of(wsnl, pos));
+      std::string optarg = "--";
+      optarg += text.substr(pos, optend - pos);
+      if ((pos = text.find_first_not_of(ws, optend)) >= sz ||
+          text[pos] == '\n') {
+        parse_cli(std::span{&optarg, 1});
+        continue;
+      }
+      optarg += '=';
+
+      bool escape = false, last_escaped = false;
+      for (; pos < sz && (escape || text[pos] != '\n'); ++pos) {
+        if (text[pos] == '\r')
+          continue;
+        if (!escape) {
+          last_escaped = false;
+          if (text[pos] == '\\')
+            escape = true;
+          else
+            optarg += text[pos];
+          continue;
+        }
+        escape = false;
+        last_escaped = true;
+        switch (text[pos]) {
+        case 't':
+          optarg += '\t';
+          break;
+        case 'r':
+          optarg += '\r';
+          break;
+        case 'n':
+          optarg += '\n';
+          break;
+        case '\n':
+          pos = clamp(text.find_first_not_of(ws, pos + 1) - 1);
+          break;
+        default:
+          optarg += text[pos];
+          break;
+        }
+      }
+      if (!last_escaped)
+        while (wsnl.contains(optarg.back()))
+          optarg.resize(optarg.size() - 1);
+      parse_cli(std::span{&optarg, 1});
     }
   }
 
