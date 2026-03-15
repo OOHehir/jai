@@ -688,7 +688,7 @@ do_main(int argc, char **argv)
   opts("-u", [&] { opt_u = true; }, "Unmount sandboxed file systems");
   opts(
       "-n", "--name",
-      [&] (std::string optarg) {
+      [&](std::string optarg) {
         conf.sandbox_name_ = optarg;
         if (conf.sandbox_name_.is_absolute() ||
             std::ranges::distance(conf.sandbox_name_.begin(),
@@ -724,12 +724,6 @@ version 3 or later; see the file named COPYING for details.)",
   });
   option_help = opts.help();
 
-  restore.reset();
-
-  if (!set_mode)
-    conf.mode_ =
-        conf.sandbox_name_ == "default" ? Config::kCasual : Config::kStrict;
-
   std::vector<char *> cmd;
   try {
     cmd.append_range(opts.parse_argv(argc, argv));
@@ -737,6 +731,30 @@ version 3 or later; see the file named COPYING for details.)",
     std::println("{}", e.what());
     usage(2);
   }
+  if (!cmd.empty() && *cmd[0] != '.' && !strchr(cmd[0], '/')) {
+    path cfpath = std::format("{}.conf", cmd[0]);
+    Fd cf = openat(conf.home_jai(), cfpath.c_str(), O_RDONLY);
+    if (!cf) {
+      if (errno != ENOENT)
+        syserr("{}", fdpath(conf.home_jai(), cfpath));
+      cfpath = "default.conf";
+      Fd cf = openat(conf.home_jai(), cfpath.c_str(), O_RDONLY);
+      if (errno != ENOENT)
+        syserr("{}", fdpath(conf.home_jai(), cfpath));
+    }
+    if (cf)
+      try {
+        opts.parse_file(read_file(*cf));
+      } catch (Options::Error &e) {
+        err<Options::Error>("{}:{}", fdpath(*cf), e.what());
+      }
+  }
+
+  restore.reset();
+
+  if (!set_mode)
+    conf.mode_ =
+        conf.sandbox_name_ == "default" ? Config::kCasual : Config::kStrict;
 
   if (opt_u) {
     if (opt_D || !opt_d.empty() || !cmd.empty())

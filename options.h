@@ -261,13 +261,13 @@ public:
         auto ha = act.has_arg();
         if (!arg.empty()) {
           if (ha == kNoArg)
-            err<OptionError>("option {} takes no argument", opt);
+            err<Error>("option {} takes no argument", opt);
           act(arg.substr(1));
         }
         else if (ha != kArg)
           act();
         else if (i + 1 == args.size())
-          err<OptionError>("option {} requires an argument", opt);
+          err<Error>("option {} requires an argument", opt);
         else
           act(args[++i]);
       }
@@ -284,7 +284,7 @@ public:
           else if (ha == kOptArg)
             act();
           else if (i + 1 == args.size())
-            err<OptionError>("option -{} requires an argument", optarg[j]);
+            err<Error>("option -{} requires an argument", optarg[j]);
           else
             act(args[++i]);
           break;
@@ -302,61 +302,68 @@ public:
   {
     static constexpr std::string_view ws = " \t\r";
     static constexpr std::string_view wsnl = " \t\r\n";
+    static constexpr std::string_view wsnleq = " \t\r\n=";
     const size_t sz = text.size();
     auto clamp = [sz](size_t n) { return std::min(n, sz); };
     for (size_t pos = 0; pos < sz;) {
-      if ((pos = text.find_first_not_of(wsnl, pos)) >= sz)
-        break;
-      if (text[pos] == '#') {
-        pos = text.find('\n', pos);
-        continue;
-      }
-      auto optend = clamp(text.find_first_of(wsnl, pos));
-      std::string optarg = "--";
-      optarg += text.substr(pos, optend - pos);
-      if ((pos = text.find_first_not_of(ws, optend)) >= sz ||
-          text[pos] == '\n') {
-        parse_argspan(std::span{&optarg, 1});
-        continue;
-      }
-      optarg += '=';
+      try {
+        if ((pos = text.find_first_not_of(wsnl, pos)) >= sz)
+          break;
+        if (text[pos] == '#') {
+          pos = text.find('\n', pos);
+          continue;
+        }
+        auto optend = clamp(text.find_first_of(wsnleq, pos));
+        std::string optarg = "--";
+        optarg += text.substr(pos, optend - pos);
+        if ((pos = text.find_first_not_of(ws, optend)) >= sz ||
+            text[pos] == '\n') {
+          parse_argspan(std::span{&optarg, 1});
+          continue;
+        }
+        if (text[pos] != '=')
+          optarg += '=';
 
-      bool escape = false, last_escaped = false;
-      for (; pos < sz && (escape || text[pos] != '\n'); ++pos) {
-        if (text[pos] == '\r')
-          continue;
-        if (!escape) {
-          last_escaped = false;
-          if (text[pos] == '\\')
-            escape = true;
-          else
+        bool escape = false, last_escaped = false;
+        for (; pos < sz && (escape || text[pos] != '\n'); ++pos) {
+          if (text[pos] == '\r')
+            continue;
+          if (!escape) {
+            last_escaped = false;
+            if (text[pos] == '\\')
+              escape = true;
+            else
+              optarg += text[pos];
+            continue;
+          }
+          escape = false;
+          last_escaped = true;
+          switch (text[pos]) {
+          case 't':
+            optarg += '\t';
+            break;
+          case 'r':
+            optarg += '\r';
+            break;
+          case 'n':
+            optarg += '\n';
+            break;
+          case '\n':
+            pos = clamp(text.find_first_not_of(ws, pos + 1) - 1);
+            break;
+          default:
             optarg += text[pos];
-          continue;
+            break;
+          }
         }
-        escape = false;
-        last_escaped = true;
-        switch (text[pos]) {
-        case 't':
-          optarg += '\t';
-          break;
-        case 'r':
-          optarg += '\r';
-          break;
-        case 'n':
-          optarg += '\n';
-          break;
-        case '\n':
-          pos = clamp(text.find_first_not_of(ws, pos + 1) - 1);
-          break;
-        default:
-          optarg += text[pos];
-          break;
-        }
+        if (!last_escaped)
+          while (wsnl.contains(optarg.back()))
+            optarg.resize(optarg.size() - 1);
+        parse_argspan(std::span{&optarg, 1});
+      } catch (const Error &e) {
+        auto lineno = std::count(text.begin(), text.begin() + clamp(pos), '\n');
+        err<Error>("{}:{}", lineno, e.what());
       }
-      if (!last_escaped)
-        while (wsnl.contains(optarg.back()))
-          optarg.resize(optarg.size() - 1);
-      parse_argspan(std::span{&optarg, 1});
     }
   }
 
