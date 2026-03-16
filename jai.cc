@@ -683,6 +683,13 @@ Config::opt_parser()
   auto ret = std::make_unique<Options>();
   Options &opts = *ret;
   opts(
+      "--casual", [this] { mode_ = kCasual; },
+      "Enable casual mode (copy-on-write overlay home directory)");
+  opts(
+      "--strict", [this] { mode_ = kStrict; },
+      std::format("Enable strict mode (run with uid {} and empty home)",
+                  kUnstrustedUser));
+  opts(
       "-d", "--dir",
       [this](path d) { grant_directories_.emplace(canonical(d)); },
       "Grant full access to DIR", "DIR");
@@ -696,7 +703,11 @@ Config::opt_parser()
           err<Options::Error>("{}: invalid sandbox name", sb.string());
         sandbox_name_ = sb;
       },
-      "Use private or overlay home directory NAME", "NAME");
+      "Use private or overlay home directory named NAME", "NAME");
+  opts("--conf", [this, opts = ret.get()](path file) {
+    if (!parse_config_file(file, opts))
+      err<Options::Error>("{}: configuration file not found", file.string());
+  });
   opts(
       "--mask",
       [this](path p) {
@@ -705,17 +716,6 @@ Config::opt_parser()
         mask_files_.emplace(std::move(p));
       },
       "Erase $HOME/FILE when first creating overlay home", "FILE");
-  opts("--conf", [this, opts = ret.get()](path file) {
-    if (!parse_config_file(file, opts))
-      err<Options::Error>("{}: configuration file not found", file.string());
-  });
-  opts(
-      "--strict", [this] { mode_ = kStrict; },
-      std::format("Enable strict mode (run with uid {} and empty home)",
-                  kUnstrustedUser));
-  opts(
-      "--casual", [this] { mode_ = kCasual; },
-      "Enable casual mode (copy-on-write overlay home directory)");
   opts(
       "--unsetenv",
       [this](std::string var) { env_filter_.emplace(std::move(var)); },

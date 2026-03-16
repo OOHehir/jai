@@ -219,7 +219,7 @@ public:
       for (size_t i = 0; (i = helpstr.find('\n', i)) != helpstr.npos;
            i += kIndent)
         helpstr.insert(++i, std::string(kIndent, ' '));
-      if (auto sz = optstr.size(); sz < kIndent - 3)
+      if (auto sz = optstr.size(); sz <= kIndent - 3)
         help_ += std::format("  {:<{}}{}\n", optstr, kIndent - 2, helpstr);
       else
         help_ += std::format("  {}\n{}{}\n", optstr, std::string(kIndent, ' '),

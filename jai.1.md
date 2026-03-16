@@ -61,12 +61,26 @@ flag.
 
 # OPTIONS
 
-`-d` *dir*, `--dir=`*dir*
+`-C` *file*, `--conf `*file*
+: Specifies the configuration file to read.  If *file* does not
+  contain a `/`, the file is relative to `$HOME/.jai`.
+
+  If no configuration file is specified, the default is based on the
+  *cmd* argument.  If *cmd* contains no slashes and does not start
+  with `.`, the system will use `$HOME/.jai/`*cmd*`.conf` if such a
+  file exists.  Otherwise the file `$HOME/.jai/default.conf` is used.
+
+  Note that the command-line arguments are parsed both before and
+  after the file specified by this option, so that command-line
+  options always take precedence.  When `conf` is specified in a
+  configuration file, the behavior is different.  The specified file
+  is read at the exact point of the `conf` directive, so that it
+  overrides previous lines and is overridden by subsequent lines.
+
+`-d` *dir*, `--dir `*dir*
 : Grant full access to directory *dir* and everything below in the
   jail.  You must own the directory.  You can supply this option
   multiple times.
-
-`-C` *file*, `--conf=`*file*
 
 `-D`, `--nocwd`
 : By default, `jai` grants access to the current working directory
@@ -75,15 +89,68 @@ flag.
   home directory will be copy-on-write and nothing will be directly
   exported.
 
-`-h` *name*
-: Instead of using an overlay of your home directory, start with a new
-  home directory stored under `$HOME/.jai/`*name*.
+`--casual`
+: Enables casual mode, in which the user's home directory is made
+  available as an overlay mount.  Casual mode protects against
+  destruction of files outside of granted directories, but does not
+  protect confidentiality:  sandboxed code can read most files
+  accessible to the user.  You can hide specific files with the
+  `--mask` option or by deleting them under `/run/jai/$USER/*.home`,
+  but because casual mode makes everything readable by default, it
+  cannot protect all sensitive files.
+
+`--strict`
+: Enables strict mode.  In strict mode, the user's home directory is
+  replaced by an empty directory, and sandboxed code runs with a
+  different user id, `jai`.  Id-mapped mounts are used to map `jai` to
+  the invoking user in granted directories.  Strict mode is the
+  default when you name a sandbox (see `--name`), but not for the
+  default sandbox.
+
+`-n` *name*, `--name `*name*
+: jai allows you to have multiple sandboxed home directories, which
+  may be useful when sandboxing multiple tools that should not have
+  access to each other's API keys.  This option specifies which home
+  directory you to use.  If no such sandbox exists yet, it will be
+  created on demand.  When not specified, the default is just
+  `default`.
+
+`--mask` *file*
+: When creating an overlay home directory, create a "whiteout" file to
+  hide *file* in the sandbox.  You can specify this option multiple
+  times.  An easier way to hide files is just to delete them from
+  `/run/jai/$USER/*.home`; hence, this option is mostly useful in
+  configuration files to specify a set of files to delete by default.
+  If you add `mask` directives to your configuration file, you will
+  need to clear mounts with `jai -u` before the changes take effect.
+
+`--unsetenv` *var*
+: Filters *var* from the environment of the sandboxed program.  Can be
+  the simple name of an environment variable, or can use the wildcard
+  `*` as in `*_PID`.  (Since sandboxed processes don't see outside
+  processes anyway, you might as well filter out any PIDs.)
+
+`--command` *bash-command*
+: jai launches the sandboxed program you specify by running
+  "`/bin/bash -c` *bash-command* *cmd* *arg*...".  By default,
+  *bash-command* just runs the program as `"$0" "$@"`, but in
+  configuration files for particular programs, you can use
+  *bash-command* to set environment variables or add additional
+  command-line options.
 
 `-u`
-: Removes the sandboxed home directory from `/run/jai`.  This also
-  destroys the private `/tmp` and `/var/tmp` directory (same directory
-  at both mount points), so make sure you don't need anything in
-  there.
+: Unmounts all overlay directories from `/run/jai` and cleans up
+  overlay-related files in `$HOME/.jai/*.work` that the user might not
+  be able to clean up without root.  This option also destroys the
+  private `/tmp` and `/var/tmp` directories (same directory at both
+  mount points), so make sure you don't need anything in there.  You
+  must use this option if you have added new files to be masked, as
+  masking only takes effect at the time an overlay home is created.
+  Note this option only impacts casual mode, as strict mode does not
+  employ overlays.
+
+`--version`
+: Prints the version number and copyright.
 
 # ENVIRONMENT
 
