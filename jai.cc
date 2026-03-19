@@ -5,6 +5,7 @@
 #include "options.h"
 
 #include <cassert>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -41,6 +42,7 @@ struct Config {
   std::string user_;
   path homepath_;
   path homejaipath_;
+  path storagedir_;
   path sandbox_name_;
   Credentials user_cred_;
   Credentials untrusted_cred_;
@@ -49,6 +51,7 @@ struct Config {
 
   Fd home_fd_;
   Fd home_jai_fd_;
+  Fd storage_fd_;
   Fd run_jai_fd_;
   Fd run_jai_user_fd_;
 
@@ -84,6 +87,7 @@ struct Config {
 
   int home();
   int home_jai();
+  int storage();
   int run_jai();
   int run_jai_user();
   const path &cwd()
@@ -250,6 +254,16 @@ Config::home_jai()
 }
 
 int
+Config::storage()
+{
+  if (storagedir_.empty())
+    return home_jai();
+  if (!storage_fd_)
+    storage_fd_ = ensure_udir(AT_FDCWD, storagedir_);
+  return *storage_fd_;
+}
+
+int
 Config::run_jai()
 {
   if (run_jai_fd_)
@@ -342,8 +356,9 @@ Config::make_home_overlay()
     return sandboxed_home;
 
   auto restore = asuser();
-  Fd changes = make_blacklist(home_jai(), cat(sandbox_name_, ".changes"));
-  Fd work = ensure_udir(home_jai(), cat(sandbox_name_, ".work"));
+  auto chgpath = cat(sandbox_name_, ".changes");
+  Fd changes = make_blacklist(storage(), chgpath);
+  Fd work = ensure_udir(*changes, ".." / cat(sandbox_name_, ".work"));
   restore.reset();
 
   Fd fsfd = xfsopen("overlay", cat("jai-", sb).c_str());
@@ -425,21 +440,17 @@ Config::make_idmap_ns()
   pid_t pid{-1};
   Defer _reap([&pid] {
     if (pid > 0) {
+      kill(pid, SIGKILL);
       while (waitpid(pid, nullptr, 0) == -1 && errno == EINTR)
         ;
     }
   });
-  auto pfds = xpipe();
   if (!(pid = xfork(CLONE_NEWUSER))) {
-    pfds[1].reset();
-    char c;
-    read(*pfds[0], &c, 1);
+    pause();
     _exit(0);
   }
-  pfds[0].reset();
 
   path child = std::format("/proc/{}", pid);
-
   Fd newns = xopenat(-1, child / "ns/user", O_RDONLY | O_CLOEXEC);
 
   Fd mapctl = xopenat(-1, child / "gid_map", O_WRONLY | O_CLOEXEC);
@@ -493,7 +504,7 @@ Config::make_mnt_ns()
       attr.attr_set |= MOUNT_ATTR_IDMAP;
       attr.userns_fd = *mapns;
     }
-    home = clone_tree(*ensure_udir(home_jai(), cat(sandbox_name_, ".home")));
+    home = clone_tree(*ensure_udir(storage(), cat(sandbox_name_, ".home")));
   }
   xmnt_setattr(*tmp, attr);
   xmnt_setattr(*home, attr);
@@ -629,12 +640,13 @@ Config::unmountall()
   if (unmount_ok)
     try {
       auto restore = asuser();
-      auto jd = xopendir(home_jai());
+      auto jd = xopendir(storage());
       while (auto de = readdir(jd)) {
         path name = d_name(de);
-        if (name.extension() == ".work")
+        if (name.extension() == ".changes")
           try {
-            Fd work = xopenat(home_jai(), name.c_str(),
+            path workpath = name / ".." / cat(name.stem(), ".work");
+            Fd work = xopenat(home_jai(), workpath.c_str(),
                               O_RDONLY | O_DIRECTORY | O_CLOEXEC);
             check_user(*work);
             restore.reset();
@@ -925,6 +937,16 @@ Config::opt_parser()
   opts(
       "--command", [this](std::string cmd) { shellcmd_ = std::move(cmd); },
       R"(Bash command line to execute program (default: "$0" "$@"))", "CMD");
+  opts(
+      "--storage", [this](std::string_view s) {
+        if (dir_relative_to_home_)
+          storagedir_ = homepath_ / s;
+        else
+          storagedir_ = s;
+      },
+      R"(Store overlay and private home directories in DIR
+(default: $JAI_CONFIG_DIR or $HOME/.jai))",
+      "DIR");
   return ret;
 }
 
@@ -934,7 +956,7 @@ std::string option_help;
 usage(int status)
 {
   if (status)
-    std::println(stderr, "Run {} --help for usage information",
+    std::println(stderr, "Try {} --help for more information.",
                  prog.filename().string());
   else
     std::print(stdout, "usage: {0} [OPTIONS] [CMD [ARG...]]\n{1}",

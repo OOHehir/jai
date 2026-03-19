@@ -350,7 +350,6 @@ open_flags_to_string(int flags)
       {O_DIRECTORY, "O_DIRECTORY"}, {O_NOFOLLOW, "O_NOFOLLOW"},
       {O_NOATIME, "O_NOATIME"},     {O_CLOEXEC, "O_CLOEXEC"},
       {O_SYNC, "O_SYNC"},           {O_PATH, "O_PATH"},
-      {O_TMPFILE, "O_TMPFILE"},
   });
 
   std::string result;

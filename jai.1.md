@@ -214,6 +214,14 @@ environment before running the command.
     If the argument contains `=`, then *var* is always treated as a
   variable, not a pattern, and it is assigned *value* in the jail.
 
+`--storage` *dir*
+: Specify an alternate location in which to store private home
+  directories and overlays.  The default is $JAI_CONFIG_DIR or
+  $HOME/.jai, but if your home directory is on NFS you may wish to use
+  storage on a local file system, as NFS does not support the extended
+  attributes required by overlay file systems and does not support
+  id-mapped mounts.
+
 `--command` *bash-command*
 : jai launches the sandboxed program you specify by running
   "`/bin/bash -c` *bash-command* *cmd* *arg*...".  By default,
