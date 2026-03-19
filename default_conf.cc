@@ -8,9 +8,9 @@ const std::string jai_defaults =
 #     conf .defaults
 #
 # You can override settings in this file by editing it directly or by
-# adding configuration directives to default.conf or other <name>.conf
-# files after the `conf .defaults` line.  (Later lines override
-# previous ones in configuration files.)
+# appending configuration directives to default.conf or other
+# <name>.conf files after the `conf .defaults` line.  (Later lines
+# override previous ones in configuration files.)
 #
 # If you delete this file, jai will re-create it the next time it
 # runs.  You can also see the default contents of this file by running
@@ -125,5 +125,11 @@ unsetenv *_TOKEN
 )";
 
 extern const std::string default_conf =
-  R"(conf .defaults
+  R"(# The following line includes sensible defaults from the file
+# .defaults.  You can override these defaults by appending
+# configuration options to this file.  See the .defaults file or the
+# jai(1) man page for details.
+
+conf .defaults
+
 )";

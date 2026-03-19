@@ -8,12 +8,13 @@ jai - Jail an AI agent
 
 # SYNOPSIS
 
+`jai` `--init` \
 `jai` [*option*]...  [*cmd* [*arg*]...] \
 `jai` `-u`
 
 # DESCRIPTION
 
-`jai` is a super lightweight sandbox for AI agents requiring almost no
+`jai` is a super-lightweight sandbox for AI agents requiring almost no
 configuration.  By default it provides casual security, so is not a
 substitute for using a proper container to confine agents.  However,
 it is a great alternative to using no protection at all when you are
@@ -54,13 +55,13 @@ option.
 
 If you use casual mode and forget to export some directory that you
 updated in the jail, you will find changed files in
-`$HOME/.jai/default.changes`.  You can destroy the sandbox with `jai
--u`, move the changed files back into your home directory, and re-run
-`jai` with the appropriate `-d` flag.
+`$HOME/.jai/default.changes`.  You can destroy the jail with `jai -u`,
+move the changed files back into your home directory, and re-run `jai`
+with the appropriate `-d` flag.
 
-jai allows the use of multiple sandboxed home directories.  To use a
-home directory other than the default, just give it a name with the
-`-n` option and it will be created on demand.  When you specify a home
+jai allows the use of multiple jailed home directories.  To use a home
+directory other than the default, just give it a name with the `-n`
+option and it will be created on demand.  When you specify a home
 directory with `-n`, strict mode becomes the default (unless there is
 no unprivileged `jai` user on your system, in which case jai falls
 back to bare mode).  It is possible to have multiple home overlays by
@@ -108,6 +109,10 @@ environment before running the command.
 
 # OPTIONS
 
+`--init`
+: Create default configuration files and exit.  You should run this
+  first, before activating any jails.
+
 `-C` *file*, `--conf `*file*
 : Specifies the configuration file to read.  If *file* does not
   contain a `/`, the file is relative to `$HOME/.jai`.
@@ -143,22 +148,22 @@ environment before running the command.
 : Set jai's execution mode.  In casual mode, the user's home directory
   is made available as an overlay mount.  Casual mode protects against
   destruction of files outside of granted directories, but does not
-  protect confidentiality:  sandboxed code can read most files
-  accessible to the user.  You can hide specific files with the
-  `--mask` option or by deleting them under `/run/jai/$USER/*.home`,
-  but because casual mode makes everything readable by default, it
-  cannot protect all sensitive files.
+  protect confidentiality:  jailed code can read most files accessible
+  to the user.  You can hide specific files with the `--mask` option
+  or by deleting them under `/run/jai/$USER/*.home`, but because
+  casual mode makes everything readable by default, it cannot protect
+  all sensitive files.
 
     In strict mode, the user's home directory is replaced by an empty
-  directory (`$HOME/.jai/`*name*`.home`), and sandboxed code runs with
-  a different user id, `jai`.  Id-mapped mounts are used to map `jai`
-  to the invoking user in granted directories.  Strict mode is the
-  default when you name a sandbox (see `--name`), but not for the
-  default sandbox.
+  directory (`$HOME/.jai/`*name*`.home`), and jailed code runs with a
+  different user id, `jai`.  Id-mapped mounts are used to map `jai` to
+  the invoking user in granted directories.  Strict mode is the
+  default when you name a jail (see `--name`), but not for the default
+  sandbox.
 
     Bare mode uses an empty directory like strict mode, but runs with
   the invoking user's credentials.  It is inferior to strict mode, but
-  can be used for NFS-mounted home directories, since NFS does not
+  can be used for NFS-mounted home directories since NFS does not
   support id-mapped mounts.
 
 `-n` *name*, `--name` *name*

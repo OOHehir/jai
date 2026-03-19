@@ -85,7 +85,7 @@ struct Config {
   }
 
   int home();
-  int home_jai();
+  int home_jai(bool create = false);
   int storage();
   int run_jai();
   int run_jai_user();
@@ -205,7 +205,7 @@ GECOS field is not "{}")",
   }
 
   const char *jcd = getenv("JAI_CONFIG_DIR");
-  homejaipath_ = homejaipath_ / (jcd ? jcd : ".jai");
+  homejaipath_ = homepath_ / (jcd ? jcd : ".jai");
 
   // Paranoia about ptrace, because we will drop privileges to access
   // the file system as the user.
@@ -245,10 +245,23 @@ Config::check_user(int fd, std::string p, bool untrusted_ok)
 }
 
 int
-Config::home_jai()
+Config::home_jai(bool create)
 {
-  if (!home_jai_fd_)
-    home_jai_fd_ = ensure_udir(home(), homejaipath_);
+  if (!home_jai_fd_) {
+    if (create)
+      home_jai_fd_ = ensure_udir(home(), homejaipath_);
+    else if (Fd fd = openat(home(), homejaipath_.c_str(),
+                            O_RDONLY | O_DIRECTORY | O_CLOEXEC)) {
+      check_user(*fd);
+      home_jai_fd_ = std::move(fd);
+    }
+    else if (errno == ENOENT) {
+      err("{} does not exist; run {} --init to create it",
+          fdpath(home(), homejaipath_), prog.filename().string());
+    }
+    else
+      syserr("{}", fdpath(home(), homejaipath_));
+  }
   return *home_jai_fd_;
 }
 
@@ -601,10 +614,10 @@ Config::make_mnt_ns()
       err("{} should be empty in jail", kRunRoot);
     Fd source = clone_tree(*empty);
     xmnt_setattr(*source, mount_attr{
-                             .attr_set = MOUNT_ATTR_RDONLY | MOUNT_ATTR_NOSUID |
-                                         MOUNT_ATTR_NODEV,
-                             .propagation = MS_PRIVATE,
-                         });
+                              .attr_set = MOUNT_ATTR_RDONLY |
+                                          MOUNT_ATTR_NOSUID | MOUNT_ATTR_NODEV,
+                              .propagation = MS_PRIVATE,
+                          });
     xmnt_move(*source, *target);
   }
 
@@ -1018,10 +1031,14 @@ do_main(int argc, char **argv)
   bool opt_u{};
   std::vector<path> opt_d;
   path opt_C = "";
+  bool opt_init{};
 
   auto opts = conf.opt_parser();
   // A few options not available in config files
   (*opts)("-u", [&] { opt_u = true; }, "Unmount sandboxed file systems");
+  (*opts)(
+      "--init", [&] { opt_init = true; },
+      "Create initial configuration files and exit");
   // Override inline conf to make CLI idempotent
   (*opts)(
       "-C", "--conf", [&](path p) { opt_C = p; },
@@ -1050,6 +1067,15 @@ The default is CMD.conf if it exists, otherwise default.conf)",
   if (!conf.mask_files_.empty())
     conf.mask_warn_ = true;
 
+  ensure_file(conf.home_jai(opt_init), ".defaults", jai_defaults, 0600);
+  ensure_file(conf.home_jai(), "default.conf", default_conf, 0600);
+
+  if (opt_init) {
+    std::println("You can edit the configuration in {}/default.conf",
+                 conf.homejaipath_.string());
+    exit(0);
+  }
+
   if (opt_u) {
     if (!conf.grant_cwd_ || !conf.grant_directories_.empty() || !cmd.empty()) {
       std::println(stderr, "-u is not compatible with -d, -D, or a command");
@@ -1059,9 +1085,6 @@ The default is CMD.conf if it exists, otherwise default.conf)",
     conf.unmountall();
     return;
   }
-
-  ensure_file(conf.home_jai(), ".defaults", jai_defaults, 0600);
-  ensure_file(conf.home_jai(), "default.conf", default_conf, 0600);
 
   if (!opt_C.empty()) {
     if (!conf.parse_config_file(opt_C))
