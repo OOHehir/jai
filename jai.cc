@@ -860,8 +860,13 @@ Config::exec(int nsfd, char **argv)
       user_cred_.make_real();
     else
       untrusted_cred_.make_real();
-    if (chdir(cwd().c_str()))
-      syserr("chdir({})", cwd().string());
+    if (chdir(cwd().c_str())) {
+      if (mode_ == kCasual || grant_cwd_ || errno != ENOENT)
+        syserr("chdir({})", cwd().string());
+      if (chdir(homepath_.c_str()))
+        syserr("chdir({})", homepath_.string());
+      warn("No \"{}\" in jail, changed to home directory", cwd().string());
+    }
     umask(old_umask_);
     const char *argv0 = argv[0];
     std::vector<const char *> bashcmd;

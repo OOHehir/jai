@@ -38,15 +38,28 @@ If you don't specify *cmd*, jai will launch a jailed shell by default.
 If you run `jai -mstrict` *cmd* [*arg*]...", then *cmd* will be run
 with an empty home directory as an unprivileged user id, but with the
 current working directory mapped to its place and fully exposed.
-While the rest of the system outside the user's home directory is
+Though the rest of the system outside the user's home directory is
 available read-only, because *cmd* is running with a different user
 ID, it will not be able to read sensitive files accessible to the
 user.
 
-If your home directory is on NFS, set the `JAI_CONFIG_DIR` environment
-variable to a directory that you own on a local file system supporting
-extended attributes.  Otherwise, overlay mounts may not work and you
-may only be able to use bare mode (see below).
+Strict mode does not let you grant access to NFS file systems.  If
+your home directory is on NFS, you can instead use bare mode with `jai
+-mbare`.  Bare mode hides your entire home directory like strict mode,
+but it still runs as your user ID.  (All modes use a private PID
+namespace, however, so jailed software cannot kill or ptrace processes
+outside of the jail.  However, bare mode allows jailed software to
+read any sensitive files you have access to outside of your home
+directory.)
+
+By default, jai will store private home directories under
+`$HOME/.jai`.  However, it needs the ability to set extended
+attributes which is not possible if your home directory is on NFS.
+You can use the option `--storage=/some/local/directory` to store
+private home directories in a different location, as long as you own
+the storage directory.  Alternatively, you can set the
+`JAI_CONFIG_DIR` environment variable to move your entire
+configuration directory from `$HOME/.jai` to a local disk.
 
 If you want to grant access to directories other than the current
 working directory, you can specify addition directories with the `-d`
@@ -54,41 +67,53 @@ option, as in `jai -d /local/build untrusted_program`.  If you don't
 want to grant access to the current working directory, use the `-D`
 option.
 
-If you use casual mode and forget to export some directory that you
-updated in the jail, you will find changed files in
-`$HOME/.jai/default.changes`.  You can destroy the jail with `jai -u`,
-move the changed files back into your home directory, and re-run `jai`
-with the appropriate `-d` flag.
+If you use casual mode and jailed software stores configuration files
+in your home directory, you will find any such changes in
+`$HOME/.jai/default.changes` (or wherever you specified for
+`--storage`).  If you wanted these changes in your home directory, you
+can destroy the jail with `jai -u`, move the changed files back into
+your home directory, then re-run `jai` with the appropriate `-d` flag
+to expose whatever directory contains the changed files (e.g.,
+`$HOME/.application` or `$HOME/.config/application`).
 
-jai allows the use of multiple jailed home directories.  To use a home
-directory other than the default, just give it a name with the `-n`
-option and it will be created on demand.  When you specify a home
-directory with `-n`, strict mode becomes the default (unless there is
-no unprivileged `jai` user on your system, in which case jai falls
-back to bare mode).  It is possible to have multiple home overlays by
-specifying `-mcasual` with `-n`.
+jai allows the use of multiple home directories for different jails.
+To use a home directory other than the default, just give it a name
+with the `-n` option and it will be created on demand.  When you
+specify a home directory with `-n`, strict mode becomes the default
+(unless there is no unprivileged `jai` user on your system, in which
+case jai falls back to bare mode).  It is possible to have multiple
+home overlays by specifying `-mcasual` with `-n`.
 
 # CONFIGURATION
 
 If *cmd* does not contain any slashes, configuration is taken from
 `$HOME/.jai/`*cmd*`.conf`, or, if no such file exists, from
-`$HOME/.jai/default.conf`.  The format of the configuration file is a
-series of lines of the form "*option* [*value*]".  *option* can be any
-long command-line option without the leading `--`, for example:
+`$HOME/.jai/default.conf`.
 
-    conf default.conf
+The format of configuration files is a series of lines of the form
+"*option* [*value*]".  *option* can be any long command-line option
+without the leading `--`, for example:
+
+    conf .defaults
     mode casual
     dir /local/build
     mask Mail
 
+If you want to set an option that requires an argument to the empty
+string, use an `=` sign, as in `storage=`.
+
 Within a configuration file, `conf` acts like an include directive,
 logically replacing the `conf` line with the contents of another
 configuration file.  (Relative paths are relative to `$HOME/.jai/`.)
+jai creates a file `.defaults` with a sensible set of defaults you
+should probably include directly or indirectly in any configuration
+file.
 
-jai executes programs with bash.  The `command` directive allows you
-to reconfigure the environment or add command-line options to certain
-commands.  For instance, to use a python virtual environment in a
-jail, you might create a file `python.conf` with the following:
+jai executes jailed programs with bash.  The `command` directive
+allows you to reconfigure the environment or add command-line options
+to certain commands.  For instance, to use a python virtual
+environment in a jail, you might create a file `python.conf` with the
+following:
 
     conf default.conf
     mode strict
@@ -101,12 +126,44 @@ environment before running the command.
 
 # EXAMPLES
 
-    jai -d ~/.claude claude
+To install claude code in a jail called `claude`:
+
+    curl -fsSL https://claude.ai/install.sh | \
+        jai -D -mstrict -n claude bash
+
+To invoke claude code in that same jail, if $HOME/.local/bin is not
+already on your path:
+
+    PATH=$HOME/.local/bin:$PATH jai -n claude claude
+
+To make `jai claude` use the claude sandbox by default:
+
+    cat <<<EOF >$HOME/.jai/claude.conf
+    conf .defaults
+    name claude
+    # Mode already defaults to strict; change to bare if using NFS
+    mode strict
+    command PATH=$HOME/.local/bin:$PATH "$0" "$@"
+    EOF
+
+To use an existing codex or opencode installation in casual mode (less
+safe) and have it update configuration files in your real home
+directory:
 
     jai -d ~/.codex codex
 
-    mkdir -p ~/.local/share/opencode
     jai -d ~/.config/opencode -d ~/.local/share/opencode opencode
+
+To do this by default when invoking `jai codex` (similar for `jai
+opencode`):
+
+    cat <<EOF >$HOME/.jai
+    conf .defaults
+    # leave default sandbox
+    mode casual
+    # list additional directories to expose
+    dir .codex
+    EOF
 
 # OPTIONS
 
