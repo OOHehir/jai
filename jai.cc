@@ -562,11 +562,9 @@ Config::make_mnt_ns()
       if (cwd() == homepath_) {
         std::string name = prog.filename().string();
         warn(
-            R"(Refusing to expose your entire home directory to sandbox.  Did
-{1:>{2}}  you forget to specify the -D option?  If you really want to grant
-{1:>{2}}  permissions on your entire home directory, use both -D and -d, as in
-{1:>{2}}    {0} -Dd {3} ...)",
-            name, "", name.size(), homepath_.string());
+            R"(Refusing to grant your entire home directory to jailed code.
+{1:>{2}}  Run "jai -D" to avoid granting the current working directory.)",
+            name, "", name.size());
         exit(1);
       }
       grant_directories_.emplace(cwd());
@@ -1078,7 +1076,7 @@ The default is CMD.conf if it exists, otherwise default.conf)",
   ensure_file(conf.home_jai(), "default.conf", default_conf, 0600);
 
   if (opt_init) {
-    std::println("You can edit the configuration in {}/default.conf",
+    std::println("You can edit the configuration defaults in {}/.defaults",
                  conf.homejaipath_.string());
     exit(0);
   }
