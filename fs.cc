@@ -140,13 +140,6 @@ xmnt_setattr(int fd, const path &file, const mount_attr &a, unsigned int flags)
     syserr("mount_setattr({})", fdpath(fd));
 }
 
-void
-xmnt_propagate(int fd, std::uint64_t propagation, bool recursive)
-{
-  mount_attr a{.propagation = propagation};
-  xmnt_setattr(fd, a, recursive ? AT_RECURSIVE : 0);
-}
-
 bool
 recursive_umount(const path &tree, bool detach)
 {

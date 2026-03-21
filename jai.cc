@@ -1,8 +1,4 @@
 #include "jai.h"
-#include "config.h"
-#include "cred.h"
-#include "fs.h"
-#include "options.h"
 
 #include <cassert>
 #include <csignal>
@@ -18,107 +14,9 @@
 #include <sys/prctl.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <termios.h>
 
 path prog;
-
-constexpr const char *kUntrustedUser = UNTRUSTED_USER;
-constexpr const char *kUntrustedGecos = "JAI sandbox untrusted user";
-constexpr const char *kRunRoot = "/run/jai";
-
-struct Config {
-  enum Mode { kInvalidMode, kCasual, kBare, kStrict };
-
-  Mode mode_{kInvalidMode};
-  PathSet grant_directories_;
-  bool grant_cwd_{true};
-  std::set<std::string, std::less<>> env_filter_;
-  std::map<std::string, std::string, std::less<>> setenv_;
-  path cwd_;
-  std::string shellcmd_;
-  PathSet mask_files_;
-  bool mask_warn_{};
-  bool dir_relative_to_home_{};
-
-  std::string user_;
-  path homepath_;
-  path homejaipath_;
-  path storagedir_;
-  path sandbox_name_;
-  Credentials user_cred_;
-  Credentials untrusted_cred_;
-  path shell_;
-  mode_t old_umask_ = 0755;
-
-  Fd home_fd_;
-  Fd home_jai_fd_;
-  Fd storage_fd_;
-  Fd run_jai_fd_;
-  Fd run_jai_user_fd_;
-
-  // Hold some file descriptors to prevent unmounting
-  std::vector<Fd> mp_holder_;
-
-  PathSet config_loop_detect_;
-
-  void init_credentials();
-  Fd make_idmap_ns();
-  Fd make_mnt_ns();
-  void exec(int nsfd, char **argv);
-  void unmount();
-  void unmountall();
-  std::unique_ptr<Options> opt_parser();
-
-  bool parse_config_file(path file, Options *opts = nullptr);
-  std::vector<const char *> make_env();
-
-  [[nodiscard]] static Defer asuser(const Credentials *crp);
-  [[nodiscard]] Defer asuser() { return asuser(&user_cred_); }
-  void check_user(int fd, std::string path_for_error = {},
-                  bool untrusted_ok = false);
-  Fd ensure_udir(int dfd, const path &p, mode_t perm = 0700,
-                 FollowLinks follow = kFollow)
-  {
-    auto _restore = asuser();
-    Fd fd = ensure_dir(dfd, p, perm, follow);
-    check_user(*fd);
-    return fd;
-  }
-
-  int home();
-  int home_jai(bool create = false);
-  int storage();
-  int run_jai();
-  int run_jai_user();
-  const path &cwd()
-  {
-    if (cwd_.empty()) {
-      auto restore = asuser();
-      cwd_ = canonical(std::filesystem::current_path());
-    }
-    return cwd_;
-  }
-
-  Fd make_blacklist(int dfd, path name);
-  Fd make_home_overlay();
-  Fd make_private_tmp();
-  Fd make_private_passwd();
-
-  static bool name_ok(path p)
-  {
-    return p.is_relative() && std::ranges::distance(p.begin(), p.end()) == 1 &&
-           *p.c_str() != '.';
-  }
-  void mask_warn()
-  {
-    if (mask_warn_) {
-      warn(R"(--mask ignored because {5}/{0}/{1}.home already mounted.
-{2:>{3}}  Run "{4} -u" to unmount overlays.)",
-           user_, sandbox_name_.string(), "", prog.filename().string().size(),
-           prog.filename().string(), kRunRoot);
-      mask_warn_ = false;
-    }
-  }
-};
 
 bool
 Config::parse_config_file(path file, Options *opts)
@@ -795,15 +693,143 @@ again:
 }
 
 void
+Config::fix_proc()
+{
+  xmnt_propagate(-1, "/", MS_PRIVATE);
+  recursive_umount("/proc");
+  xmnt_move(*make_mount(*xfsopen("proc", "proc"), MOUNT_ATTR_NOSUID |
+                                                      MOUNT_ATTR_NODEV |
+                                                      MOUNT_ATTR_NOEXEC),
+            -1, "/proc");
+}
+
+// Implement PID 1 in the new namespace.  Only returns for PID 2.
+void
+Config::pid1(Fd stop_me)
+try {
+  // Kill entire sandbox if parent jai process terminates
+  prctl(PR_SET_PDEATHSIG, SIGKILL);
+
+  // On the off chance that our parent exited and we got reparented to
+  // init (outside the sandbox) before setting PDEATHSIG, try writing
+  // one byte to the pipe so that a SIGPIPE kills us.
+  if (write(*stop_me, "", 1) != 1)
+    err("parent killed before PR_SET_PDEATHSIG");
+
+  fix_proc();
+
+  // Return in pid 2, continue in pid 1
+  auto pid = xfork();
+  if (!pid)
+    return;
+
+  prctl(PR_SET_NAME, "jai-init");
+
+  // We have to two distinct cases.  1) If our child process starts a
+  // new process group (e.g., an interactive shell), then when the
+  // child stops stops (e.g., the user runs "suspend"), we also need
+  // to stop.  When we are resumed, we need to resume the child and
+  // make it's process group the foreground process group (assuming we
+  // have a controlling terminal).
+  //
+  // 2) if the child process does not start a new process group, then
+  // we just let the outer shell handle any job control duties.  It's
+  // a bit strange that in the this case we are a member of process
+  // group that doesn't exist in our own PID namespace, but getpgid(0)
+  // just returns 0, which is good enough to differentiate it from an
+  // in-namespace pgid.
+
+  // Note: getpgid is technicalaly not signal safe, but disassembling
+  // glibc shows it doesn't do anything problematic other than maybe
+  // change errno.  Conceivably there could be weirdness performing
+  // lazy dynamic linking within a signal handler, so call getpgid at
+  // least once before setting the signal handler.
+  static pid_t my_pgid, main_child_pid;
+  my_pgid = getpgid(0);
+  main_child_pid = pid;
+
+  static Fd tty;
+  tty = open("/dev/tty", O_RDWR | O_CLOEXEC);
+
+  struct sigaction sa{};
+  sigaddset(&sa.sa_mask, SIGTTOU);
+  sa.sa_handler = +[](int sig) {
+    int saved_errno = errno;
+    if (auto pg = getpgid(main_child_pid); pg != my_pgid) {
+      if (tty)
+        tcsetpgrp(*tty, pg);
+      killpg(pg, sig);
+    }
+    errno = saved_errno;
+  };
+  if (sigaction(SIGCONT, &sa, nullptr))
+    syserr("sigaction(SIGCONT)");
+
+  for (;;) {
+    propagate_exit(pid, true);
+    if (auto pg = getpgid(main_child_pid); pg != my_pgid)
+      write(*stop_me, "", 1);
+  }
+} catch (const std::exception &e) {
+  warn("{}", e.what());
+  _exit(1);
+}
+
+void
+Config::pid2(char **argv)
+try {
+  if (mode_ == kCasual || mode_ == kBare)
+    user_cred_.make_real();
+  else
+    untrusted_cred_.make_real();
+  if (chdir(cwd().c_str())) {
+    if (mode_ == kCasual || grant_cwd_ || errno != ENOENT)
+      syserr("chdir({})", cwd().string());
+    if (chdir(homepath_.c_str()))
+      syserr("chdir({})", homepath_.string());
+    warn("No \"{}\" in jail, changed to home directory", cwd().string());
+  }
+  umask(old_umask_);
+  const char *argv0 = argv[0];
+  std::vector<const char *> bashcmd;
+  if (!shellcmd_.empty()) {
+    argv0 = PATH_BASH;
+    bashcmd.push_back("init");
+    bashcmd.push_back("-c");
+    bashcmd.push_back(shellcmd_.c_str());
+    while (*argv)
+      bashcmd.push_back(*(argv++));
+    bashcmd.push_back(nullptr);
+    argv = const_cast<char **>(bashcmd.data());
+  }
+
+  setenv("JAI_NAME", sandbox_name_.c_str(), 1);
+  setenv("JAI_MODE",
+         mode_ == kStrict ? "strict"
+         : mode_ == kBare ? "bare"
+                          : "casual",
+         1);
+  auto env = make_env();
+
+  execvpe(argv0, argv, const_cast<char **>(env.data()));
+  perror(argv0);
+  _exit(1);
+} catch (const std::exception &e) {
+  warn("{}", e.what());
+  _exit(1);
+}
+
+void
 Config::exec(int nsfd, char **argv)
 {
   // This function is a bit annoying because the existing jai process
   // cannot move to a new PID namespace, so we have to fork once.  But
   // the forked process will have PID 1 and behave strangely (such as
-  // not receiving signals), so needs to fork again to run the actual
-  // jailed program with a normal PID.  Then PID 1 has to propagate
-  // exit and stop events to the outer parent, which must propagate
-  // them to the process than ran jai.
+  // not receiving signals from within the PID namespace), so needs to
+  // fork again to run the actual jailed program with a normal PID.
+  // That means PID 1 has to propagate termination events of process 2
+  // to its own parent, which must then propagate them to the process
+  // than ran jai.
   //
   // Further complicating matters, PID 1 cannot stop itself (since it
   // cannot receive a SIGSTOP from within the PID namespace).  Hence,
@@ -811,7 +837,7 @@ Config::exec(int nsfd, char **argv)
   // original jai process stop it (from outside the PID namespace).
   auto stop_me = xpipe();
 
-  if (auto pid = xfork(CLONE_NEWPID | CLONE_NEWIPC)) {
+  if (auto pid = xfork(CLONE_NEWPID | CLONE_NEWIPC | CLONE_NEWNS)) {
     // This is the last process in the old PID namespace
     close(nsfd);
     stop_me[1].reset();
@@ -827,81 +853,10 @@ Config::exec(int nsfd, char **argv)
   }
   stop_me[0].reset();
 
-  if (auto pid = xfork()) {
-    // This is the "init" process with PID 1 in the new namespace
-    prctl(PR_SET_PDEATHSIG, SIGKILL);
-    // If the parent exited, users will be able to unmount overlay
-    // file systems that still exist in other namespaces, which is
-    // annoying and makes it hard to re-create them.  Write one byte
-    // to the pipe to die of a SIGPIPE in case the parent died in the
-    // brief moment before we set PR_SET_PDEATHSIG.  (getppid() won't
-    // tell us if we got reparented to init since we are in a new PID
-    // namespace.)
-    if (write(*stop_me[1], "", 1) != 1) {
-      warn("parent killed before PR_SET_PDEATHSIG");
-      _exit(1);
-    }
-    prctl(PR_SET_NAME, "jai-init");
-
-    static pid_t main_child_pid;
-    main_child_pid = pid;
-    signal(SIGCONT, +[](int sig) { kill(main_child_pid, sig); });
-
-    for (;;) {
-      propagate_exit(pid, true);
-      write(*stop_me[1], "", 1);
-    }
-  }
-  stop_me[1].reset();
-
-  try {
-    xsetns(nsfd, CLONE_NEWNS);
-    recursive_umount("/proc");
-    xmnt_move(*make_mount(*xfsopen("proc", "proc"), MOUNT_ATTR_NOSUID |
-                                                        MOUNT_ATTR_NODEV |
-                                                        MOUNT_ATTR_NOEXEC),
-              -1, "/proc");
-
-    if (mode_ == kCasual || mode_ == kBare)
-      user_cred_.make_real();
-    else
-      untrusted_cred_.make_real();
-    if (chdir(cwd().c_str())) {
-      if (mode_ == kCasual || grant_cwd_ || errno != ENOENT)
-        syserr("chdir({})", cwd().string());
-      if (chdir(homepath_.c_str()))
-        syserr("chdir({})", homepath_.string());
-      warn("No \"{}\" in jail, changed to home directory", cwd().string());
-    }
-    umask(old_umask_);
-    const char *argv0 = argv[0];
-    std::vector<const char *> bashcmd;
-    if (!shellcmd_.empty()) {
-      argv0 = PATH_BASH;
-      bashcmd.push_back("init");
-      bashcmd.push_back("-c");
-      bashcmd.push_back(shellcmd_.c_str());
-      while (*argv)
-        bashcmd.push_back(*(argv++));
-      bashcmd.push_back(nullptr);
-      argv = const_cast<char **>(bashcmd.data());
-    }
-
-    setenv("JAI_NAME", sandbox_name_.c_str(), 1);
-    setenv("JAI_MODE",
-           mode_ == kStrict ? "strict"
-           : mode_ == kBare ? "bare"
-                            : "casual",
-           1);
-    auto env = make_env();
-
-    execvpe(argv0, argv, const_cast<char **>(env.data()));
-    perror(argv0);
-    _exit(1);
-  } catch (const std::exception &e) {
-    warn("{}", e.what());
-    _exit(1);
-  }
+  pid1(std::move(stop_me[1]));
+  xsetns(nsfd, CLONE_NEWNS);
+  fix_proc();
+  pid2(argv);
 }
 
 std::unique_ptr<Options>

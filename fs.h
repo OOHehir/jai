@@ -97,7 +97,20 @@ xmnt_setattr(int fd, const mount_attr &a, unsigned int flags = AT_RECURSIVE)
   xmnt_setattr(fd, {}, a, flags);
 }
 
-void xmnt_propagate(int fd, std::uint64_t propagation, bool recursive = true);
+inline void
+xmnt_propagate(int fd, std::uint64_t propagation, bool recursive = true)
+{
+  mount_attr a{.propagation = propagation};
+  xmnt_setattr(fd, a, recursive ? AT_RECURSIVE : 0);
+}
+
+inline void
+xmnt_propagate(int fd, path file, std::uint64_t propagation,
+               bool recursive = true)
+{
+  mount_attr a{.propagation = propagation};
+  xmnt_setattr(fd, file, a, recursive ? AT_RECURSIVE : 0);
+}
 
 template<std::convertible_to<const char *>... Opt>
 requires (sizeof...(Opt) % 2 == 0)
