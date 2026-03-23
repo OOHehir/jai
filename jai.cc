@@ -796,8 +796,12 @@ Config::parent_loop(pid_t pid, int stop_requests)
   };
 
   // If we've been resumed, discard any previous stop requests
+  static volatile sig_atomic_t continued = 0;
   struct sigaction sa{};
-  sa.sa_handler = +[](int) { drain_pipe(); };
+  sa.sa_handler = +[](int) {
+    drain_pipe();
+    continued = 1;
+  };
   sigemptyset(&sa.sa_mask);
   if (sigaction(SIGCONT, &sa, nullptr))
     syserr("sigcation(SIGCONT)");
@@ -823,7 +827,15 @@ Config::parent_loop(pid_t pid, int stop_requests)
       else if (auto sig = propagate_termination_status(status); sig > 0) {
         if (my_next_stop_sig > 0)
           sig = std::exchange(my_next_stop_sig, 0);
+        continued = 0;
         raise(sig);
+        if (continued == 0)
+          // If we are in an orphaned process group, the default
+          // action of SIGTSTP, SIGTTIN, and SIGTTOU is ignore rather
+          // than stop.  While we'd like to propagate the exact stop
+          // signal of the jailed process when possible, in this case
+          // the only way to stop ourselves is with SIGSTOP.
+          raise(SIGSTOP);
       }
     }
 
