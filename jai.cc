@@ -487,6 +487,12 @@ Config::make_mnt_ns()
   for (auto d : grant_directories_) {
     if (d.is_relative())
       d = "/" / d;
+    if (contains(homejaipath_, d))
+      err("{}: cannot export a directory within {}", d.string(),
+          homejaipath_.string());
+    if (contains(storagedir_, d))
+      err("{}: cannot export a directory within {}", d.string(),
+          storagedir_.string());
     xsetns(*oldns, CLONE_NEWNS);
     auto restore_root = asuser();
     Fd src = xopenat(-1, d, O_DIRECTORY | O_PATH | O_CLOEXEC);
@@ -520,12 +526,15 @@ Config::make_mnt_ns()
       return;
     restore_root.reset();
 
-    struct stat sbold, sbnew = xfstat(*target);;
-    xsetns(*oldns, CLONE_NEWNS);
-    int staterr = stat(p.c_str(), &sbold);
-    xsetns(*newns, CLONE_NEWNS);
-    if (staterr || sbold.st_ino != sbnew.st_ino || sbold.st_dev != sbnew.st_dev)
-      return;
+    if (mode_ != kCasual) {
+      struct stat sbold, sbnew = xfstat(*target);
+      xsetns(*oldns, CLONE_NEWNS);
+      int staterr = stat(p.c_str(), &sbold);
+      xsetns(*newns, CLONE_NEWNS);
+      if (staterr || sbold.st_ino != sbnew.st_ino ||
+          sbold.st_dev != sbnew.st_dev)
+        return;
+    }
 
     check_user(*target, p, true);
     Fd empty = xopenat(-1, kRunRoot, O_RDONLY);

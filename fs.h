@@ -31,6 +31,18 @@ cat(path left, const path &right)
   return left += right;
 }
 
+inline size_t
+components(const path &p)
+{
+  return std::ranges::distance(p.begin(), p.end());
+}
+
+inline bool
+contains(const path &dir, const path &subpath)
+{
+  return std::ranges::mismatch(dir, subpath).in1 == dir.end();
+}
+
 // True is target matches pattern (with * expanded)
 bool glob(std::string_view pattern, std::string_view target);
 
