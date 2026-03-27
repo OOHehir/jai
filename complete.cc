@@ -46,7 +46,7 @@ complete_path(int dfd, CompSet &c, bool dir_only)
     if (dir_only && de->d_type != DT_DIR)
       continue;
     c.output("{}{}", (arg.parent_path() / d_name(de)).string(),
-             de->d_type == DT_DIR ? "/" : "");
+             de->d_type == DT_DIR ? "/" : " ");
   }
 }
 
@@ -76,9 +76,9 @@ complete_env(CompSet &c, bool eq)
     if (auto pos = var.find('='); pos == var.npos)
       continue;
     else
-      var = var.substr(0, eq ? pos + 1 : pos);
+      var = var.substr(0, pos);
     if (var.starts_with(arg))
-      c.output("{}", var);
+      c.output("{}{}", var, eq ? "=" : " ");
   }
 }
 
@@ -87,7 +87,7 @@ Config::complete(Completions c)
 {
   using enum Completions::Disposition;
   if (c.kind >= 0) {
-    std::println("_command_offset {}", c.kind);
+    std::println("_command_offset {}", c.kind - 1);
     return 0;
   }
   if (c.kind == kNoCompletions)
@@ -106,7 +106,7 @@ Config::complete(Completions c)
     auto arg = c.arg();
     for (std::string_view sv : {"casual", "strict", "bare"}) {
       if (sv.starts_with(arg))
-        cs.output("{}", sv);
+        cs.output("{} ", sv);
     }
   }
   else if (std::ranges::contains(

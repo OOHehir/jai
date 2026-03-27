@@ -14,7 +14,10 @@ jai.1: jai.1.md
 sysusersdir = $(prefix)/lib/sysusers.d
 sysusers_DATA = jai.conf
 
-EXTRA_DIST = jai.1 jai.1.md jai.conf.in logo.svg
+bashcompdir = $(datadir)/bash-completion/helpers
+bashcomp_DATA = bash-completion/jai
+
+EXTRA_DIST = jai.1 jai.1.md jai.conf.in jai.bash logo.svg
 
 CLEANFILES = *~
 DISTCLEANFILES = jai.conf
@@ -36,11 +39,13 @@ install-exec-hook:
 	-chmod 04511 $(DESTDIR)$(bindir)/jai
 
 install-data-hook:
-	test ! -r $(DESTDIR)/etc/passwd || systemd-sysusers --root=$(DESTDIR)/
+	test ! -r "$(DESTDIR)/etc/passwd" || \
+		systemd-sysusers --root="$(DESTDIR)/"
 
 uninstall-hook:
-	@if gecos=$$(getent passwd @UNTRUSTED_USER@ 2>/dev/null | cut -d: -f5) \
+	@if test -r "$(DESTDIR)/etc/passwd" && \
+	gecos=$$(getent passwd @UNTRUSTED_USER@ 2>/dev/null | cut -d: -f5) \
 	    && test "$$gecos" = "JAI sandbox untrusted user"; then \
 	  echo "userdel @UNTRUSTED_USER@"; \
-	  userdel @UNTRUSTED_USER@; \
+	  userdel -R "$(DESTDIR)/" @UNTRUSTED_USER@; \
 	fi

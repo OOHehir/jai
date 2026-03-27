@@ -1,0 +1,36 @@
+# -*- shell-script -*-
+
+_jai()
+{
+    local cur prev words cword
+    _init_completion -n = || return
+
+    # Ask jai itself for completions.  Pass every word except $0,
+    # including the current (possibly incomplete) word.
+    local -a comp_args=( "${words[@]:1}" )
+    local output
+    output=$(jai --complete "${comp_args[@]}" 2>/dev/null) || return
+
+    # If jai returns the special completion "_command_offset N", it
+    # means subcommand starts at offset N, so delegate to
+    # bash-completion's _command_offset which handles completing an
+    # arbitrary command (c.f. sudo).
+    if [[ $output == _command_offset\ * ]]; then
+        local offset=${output#_command_offset }
+        _command_offset "$offset"
+        return
+    fi
+
+    # Otherwise jai returned sorted candidate completions, one per
+    # line, including a trailing space if the argument is complete, so
+    # no need for bash to add spaces.
+    compopt -o nospace -o nosort
+
+    COMPREPLY=()
+    while IFS= read -r line; do
+	# Note bash COMP_WORDBREAKS splits on '=' and only completes
+	# the part after it, so we need to strip off the first =.
+        COMPREPLY+=( "${line#--*=}" )
+    done <<< "$output"
+} &&
+complete -F _jai jai
