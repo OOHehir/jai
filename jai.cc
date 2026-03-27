@@ -336,6 +336,17 @@ Config::make_private_tmp()
 }
 
 Fd
+Config::make_private_run()
+{
+  Fd fd = ensure_dir(run_jai_user(), "tmp/.run" / sandbox_name_, 0700,
+                     kNoFollow, true);
+  if (xfstat(*fd).st_uid != user_cred_.uid_ &&
+      fchown(*fd, user_cred_.uid_, user_cred_.gid_))
+    syserr("{}: fchown", fdpath(*fd));
+  return fd;
+}
+
+Fd
 Config::make_private_passwd()
 {
   if (Fd fd = openat(run_jai_user(), "passwd", O_RDONLY | O_CLOEXEC))
@@ -430,6 +441,16 @@ Config::make_mnt_ns()
   Fd passwd;
   if (mode_ == kStrict)
     passwd = clone_tree(*make_private_passwd());
+  path xdgrun = std::format("/run/user/{}", user_cred_.uid_);
+  Fd rundir;
+  if (!grant_directories_.contains(xdgrun)) {
+    if (struct stat sb; !stat(xdgrun.c_str(), &sb)) {
+      check_user(sb, xdgrun);
+      rundir = clone_tree(*make_private_run());
+    }
+    else if (errno != ENOENT)
+      syserr("{}", xdgrun.string());
+  }
 
   Fd home;
   Fd mapns;
@@ -449,6 +470,8 @@ Config::make_mnt_ns()
   xmnt_setattr(*home, attr);
   if (passwd)
     xmnt_setattr(*passwd, attr);
+  if (rundir)
+    xmnt_setattr(*rundir, attr);
 
   if (unshare(CLONE_NEWNS))
     syserr("unshare(CLONE_NEWNS)");
@@ -468,6 +491,8 @@ Config::make_mnt_ns()
   xmnt_move(*home, -1, homepath_);
   if (passwd)
     xmnt_move(*passwd, -1, "/etc/passwd");
+  if (rundir)
+    xmnt_move(*rundir, -1, xdgrun);
 
   if (grant_cwd_) {
     if (!grant_directories_.contains(cwd())) {
@@ -504,7 +529,7 @@ Config::make_mnt_ns()
     restore_root = asuser();
     Fd dst = openat(-1, d.c_str(), O_DIRECTORY | O_PATH | O_CLOEXEC);
     if (!dst) {
-      if (mode_ != kStrict || (errno != EACCES && errno != ENOENT))
+      if (errno != EACCES && errno != ENOENT)
         syserr("{}", d.string());
       restore_root.reset();
       restore_root = asuser(sbcred);
@@ -980,14 +1005,16 @@ Config::opt_parser(bool dotjail)
       "casual|bare|strict");
   opts(
       "-d", "--dir",
-      [this](path d) {
+      [this](std::string_view arg) {
+        path d(expand(arg));
         grant_directories_.emplace(
             canonical(parsing_config_file_ ? homepath_ / d : d));
       },
       "Grant full access to DIR.", "DIR");
   opts(
       "-x", "--xdir",
-      [this](path d) {
+      [this](std::string_view arg) {
+        path d(expand(arg));
         grant_directories_.erase(
             canonical(parsing_config_file_ ? homepath_ / d : d));
       },
@@ -1014,14 +1041,18 @@ Config::opt_parser(bool dotjail)
   });
   opts(
       "--mask",
-      [this](path p) {
+      [this](std::string_view arg) {
+        path p(expand(arg));
         if (p.is_absolute())
           err<Options::Error>("{}: cannot mask an absolute path", p.string());
         mask_files_.emplace(std::move(p));
       },
       "Erase $HOME/FILE when first creating overlay home", "FILE");
   opts(
-      "--unmask", [this](path p) { mask_files_.erase(p); },
+      "--unmask", [this](std::string_view arg) {
+        path p(expand(arg));
+        mask_files_.erase(p);
+      },
       "Undo the effects of a previous --mask option", "FILE");
   opts(
       "--unsetenv",

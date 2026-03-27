@@ -152,6 +152,12 @@ environment before running the command.  For more complicated setup
 logic, you can use `setenv` to set the `BASH_ENV` environment variable
 to an initialization script to be sourced in non-interactive session.
 
+The `--dir`, `--xdir`, `--mask`, `--unmask`, `--setenv`, and
+`--storage` options will perform environment variable substitution for
+variable names contained within `${`...`}`, but the braces are
+required, unlike in the shell.  You can quote a literal `$` by
+preceding it with a backslash `\`.
+
 # EXAMPLES
 
 To install claude code in a jail called `claude`:
@@ -359,22 +365,12 @@ opencode`):
     If the argument contains `=`, then *var* is always treated as a
   variable, not a pattern, and it is assigned *value* in the jail.
 
-    If *value* contains the pattern `${`*envvar*`}`, it will be
-  replaced by the value of the environment variable *envvar* at the
-  time jai was invoked, or to *envval* of the previous `--setenv`
-  *envvar*`=`*envval* command if that `--setenv` has not been undone
-  by a subsequent `--unsetenv`.  If *value* contains `\`, it escapes
-  the next character.
-
 `--storage` *dir*
 : Specify an alternate location in which to store private home
   directories and overlays.  The default is `$JAI_CONFIG_DIR` if set,
   otherwise `$HOME/.jai`.  However, if your home directory is on NFS
   you may wish to use storage on a local file system, as NFS does not
   support the extended attributes required by overlay file systems.
-
-    Like `--setenv`, `--storage` expands `${`*envvar*`}` patterns and
-uses `\` to escape the next character.
 
 `--command` *bash-command*
 : jai launches the jailed program you specify by running "`/bin/bash

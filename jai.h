@@ -166,6 +166,7 @@ struct Config {
   Fd make_blacklist(int dfd, path name);
   Fd make_home_overlay();
   Fd make_private_tmp();
+  Fd make_private_run();
   Fd make_private_passwd();
 
   const char *env_lookup(std::string_view var)
