@@ -195,7 +195,18 @@ To make `jai claude` use the claude jail by default:
 Now you can run `jai claude` to invoke claude code with access to the
 current working directory, and `jail -C claude` to get a shell with
 the same permissions as claude, so as to understand what claude is
-seeing.  To make `jai claudeyolo` run claude in dangerous mode, you
+seeing.  To prohibit claude from changing git state when run in the
+root of a git repository, you can make `$PWD/.git` read-only when it
+exists:
+
+    cat <<'EOF' >$HOME/.jai/claude.conf
+    conf .defaults
+    jail claude
+    rdir? ${PWD}/.git
+    setenv PATH=${HOME}/.local/bin:${PATH}
+    EOF
+
+To make `jai claudeyolo` run claude in dangerous mode, you
 could create another configuration file like this:
 
     cat <<'EOF' > $HOME/.jai/claudeyolo.conf
@@ -213,8 +224,8 @@ could create another configuration file like this:
 
 The author is not advocating doing the above!  But if you are going to
 use claude in dangerous mode, better to make the alias available only
-in jai, not in your outside shells, so you don't accidentally do it
-without jai.
+in jai, not in your unconfined shells, so you don't accidentally
+invoke the mode without jai.
 
 Suppose you want to make your X11 session available in the claude jail
 to facilitate pasting images into claude.  This significantly reduces
@@ -287,8 +298,15 @@ opencode`):
   to the current working directory, while in configuration files, they
   are relative to your home directory.
 
+`-r` *dir*, `--rdir` *dir*, `--rdir?` *dir*
+: Like `--dir`, but grant _read-only_ access to directory *dir*.  Like
+  `-d` and `--dir`, `-r` and `--rdir` cause an error if the directory
+  does not exist, while `--rdir?` is silently ignored if the directory
+  does not exist.
+
 `-x` *dir*, `--xdir` *dir*
-: Reverse the effects of a previous `--dir` *dir* option.
+: Reverse the effects of a previous `--dir` *dir* or `--rdir` *dir*
+  option.
 
 `-D`, `--nocwd`
 : By default, `jai` grants access to the current working directory
@@ -457,6 +475,11 @@ Jai sets the following environment variables inside jails:
 `JAI_USER`
 : Set to the name of the user who invoked jai.
 
+`PWD`
+: Set to the current working directory.  Usually your shell will
+  already set this variable, but jai guarantees it is correct, so you
+  can expand it in configuration files.
+
 # FILES
 
 In the following paths, the location `$HOME/.jai` can be changed by
@@ -520,6 +543,10 @@ variables or command-line options:
 `/run/jai/$USER/tmp/default`, `/run/jai/$USER/tmp/`*name*
 : Private `/tmp` and `/var/tmp` directory (they are the same) in
   jails.
+
+`/run/jai/$USER/tmp/.run/defaut`, `/run/jai/$USER/tmp/.run/`*name*
+: Outside a sandbox, these paths provide access to `/run/user/$UID`
+  inside either the default sandbox or the one named *name*.
 
 # BUGS
 

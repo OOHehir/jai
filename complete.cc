@@ -109,8 +109,9 @@ Config::complete(Completions c)
         cs.output("{} ", sv);
     }
   }
-  else if (std::ranges::contains(
-          std::array{"-d", "--dir", "-x", "--xdir", "--storage"}, opt))
+  else if (std::ranges::contains(std::array{"-d", "--dir", "-x", "--xdir", "-r",
+                                            "--rdir", "--rdir?", "--storage"},
+                                 opt))
     complete_path(AT_FDCWD, cs, true);
   else if (std::ranges::contains(std::array{"--mask", "--unmask"}, opt))
     complete_path(home(), cs, false);

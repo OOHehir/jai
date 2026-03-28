@@ -1,4 +1,4 @@
-AC_INIT([jai], [0.2-dev],
+AC_INIT([jai], [0.3-pre],
    [https://github.com/stanford-scs/jai/issues
    or https://www.scs.stanford.edu/~dm/addr/],,
    [https://jai.scs.stanford.edu/])

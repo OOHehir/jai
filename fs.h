@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <expected>
 #include <filesystem>
+#include <map>
 #include <ranges>
 #include <set>
 #include <string>
@@ -56,6 +57,7 @@ struct PathLess {
 
 using PathSet = std::set<path, PathLess>;
 using PathMultiset = std::multiset<path, PathLess>;
+template<typename V> using PathMap = std::map<path, V, PathLess>;
 
 // Return a range for a subtree rooted at root.  root itself will be
 // returned only if it does not contain a trailing slash.

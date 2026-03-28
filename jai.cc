@@ -12,6 +12,7 @@
 #include <poll.h>
 #include <pwd.h>
 #include <ranges>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include <sys/signalfd.h>
 #include <sys/types.h>
@@ -505,11 +506,13 @@ Config::make_mnt_ns()
             name, "", name.size());
         exit(1);
       }
-      grant_directories_.emplace(cwd());
+      grant_directories_.emplace(cwd(), 0);
     }
   }
 
-  for (auto d : grant_directories_) {
+  for (const auto &df : grant_directories_) {
+    path d = df.first;
+    auto flags = df.second;
     if (d.is_relative())
       d = "/" / d;
     if (contains(homejaipath_, d))
@@ -524,7 +527,10 @@ Config::make_mnt_ns()
     check_user(*src, d);
     restore_root.reset();
     src = clone_tree(*src); // Should it be recursive?
-    xmnt_setattr(*src, attr);
+    auto dirattr = attr;
+    if (flags & kGrantRO)
+      dirattr.attr_set |= MOUNT_ATTR_RDONLY;
+    xmnt_setattr(*src, dirattr);
 
     xsetns(*newns, CLONE_NEWNS);
     restore_root = asuser();
@@ -1009,9 +1015,28 @@ Config::opt_parser(bool dotjail)
       [this](std::string_view arg) {
         path d(expand(arg));
         grant_directories_.emplace(
-            canonical(parsing_config_file_ ? homepath_ / d : d));
+            canonical(parsing_config_file_ ? homepath_ / d : d), 0);
       },
       "Grant full access to DIR.", "DIR");
+  opts(
+      "-r", "--rdir",
+      [this](std::string_view arg) {
+        path d(expand(arg));
+        grant_directories_.emplace(
+            canonical(parsing_config_file_ ? homepath_ / d : d), kGrantRO);
+      },
+      "Grant read-only access to DIR.", "DIR");
+  opts(
+      "--rdir?",
+      [this](std::string_view arg) {
+        path d(expand(arg));
+        try {
+          grant_directories_.emplace(
+              canonical(parsing_config_file_ ? homepath_ / d : d), kGrantRO);
+        } catch (const std::exception &) {
+        }
+      },
+      "Grant read-only access to DIR.", "DIR");
   opts(
       "-x", "--xdir",
       [this](std::string_view arg) {
@@ -1140,7 +1165,11 @@ do_main(int argc, char **argv)
   Config conf;
   conf.init_credentials();
   auto restore = conf.asuser();
-  conf.cwd(); // compute and cache while privileges lowered
+
+  // Compute and cache pwd while privileges lowered.  Also override
+  // the existing environment variable in case the user does something
+  // strange.
+  setenv("PWD", conf.cwd().c_str(), 1);
 
   bool opt_u{};
   std::vector<path> opt_d;

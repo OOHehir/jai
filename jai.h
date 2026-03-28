@@ -71,9 +71,10 @@ extern const std::string default_jail;
 
 struct Config {
   enum Mode { kCasual, kBare, kStrict };
+  static constexpr int kGrantRO = 1;
 
   Mode mode_{kStrict};
-  PathSet grant_directories_;
+  PathMap<int> grant_directories_;
   bool grant_cwd_{true};
   std::set<std::string, std::less<>> env_filter_;
   std::map<std::string, std::string, std::less<>> setenv_;
