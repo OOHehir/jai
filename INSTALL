@@ -16,13 +16,13 @@ In Ubuntu, you may need the following to get a modern compiler:
     sudo apt install g++-15 libmount-dev libacl1-dev pkg-config
     export CXX=g++-15
 
-To build from building from a release tarball, run:
+To build from a release tarball, run:
 
     ./configure
     make
 
-To build from a git checkout, you will need autoconf, automake, and
-pandoc (to format the man page).  Run:
+To build from a git checkout, you will also need to install autoconf,
+automake, and pandoc (to format the man page).  Run:
 
     ./autogen.sh
     ./configure
