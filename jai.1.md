@@ -415,10 +415,10 @@ opencode`):
   the `--command` option, the `--script` option allows you to define
   shell functions that operate as command aliases.  `--script` aborts
   with an error if *bash-file* does not exist, while `--script?`
-  silently ignores a non-existent file.  On the command-line, the path
-  of *bash-file* is relative to the current working directory, while
-  in a configuration file it is relative to `$JAI_CONFIG_DIR` (or
-  `$HOME/.jai` if not set).
+  silently ignores a non-existent or inaccessible file.  On the
+  command-line, the path of *bash-file* is relative to the current
+  working directory, while in a configuration file it is relative to
+  `$JAI_CONFIG_DIR` (or `$HOME/.jai` if not set).
 
     The concatenated script file will also try to delete itself to
   keep your `/tmp` directory clean.  You can disable this behavior and
@@ -427,6 +427,13 @@ opencode`):
   getting some error message, you can run `JAI_KEEP_SCRIPT=1 jai
   -C`*conf* (with no command) to get a shell, and then examine the
   file `$JAI_SCRIPT` from within the sandbox.
+
+    Note that each script file is included only once in the
+concatenated file, starting with script files specified on the command
+line, then those in `.conf` file, then those in `.jail` files.  This
+is because earlier files can bypass processing of later ones by using
+the bash `return` builtin, or can make variables read-only via the
+`readonly` or `declare -r` bash builtins.
 
 `--command` *bash-command*
 : If you set this option, jai will launches the jailed program you
