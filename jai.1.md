@@ -407,12 +407,34 @@ opencode`):
   directory, but `--storage` allows you to relocate the base directory
   where all jails are located.
 
+`--script` *bash-file*, `--script?` *bash-file*
+: If you specify one or more bash script files, they will be
+  concatenated into a temporary file that will also delete itself when
+  sourced, and the `JAI_SCRIPT` environment variable will point to
+  this file in a jail.  Because you can run commands from bash using
+  the `--command` option, the `--script` option allows you to define
+  shell functions that operate as command aliases.  `--script` aborts
+  with an error if *bash-file* does not exist, while `--script?`
+  silently ignores a non-existent file.  On the command-line, the path
+  of *bash-file* is relative to the current working directory, while
+  in a configuration file it is relative to `$JAI_CONFIG_DIR` (or
+  `$HOME/.jai` if not set).
+
+    The concatenated script file will also try to delete itself to
+  keep your `/tmp` directory clean.  You can disable this behavior and
+  keep the script around for the duration of the sandbox run by
+  setting the `JAI_KEEP_SCRIPT` environment variable.  If you are
+  getting some error message, you can run `JAI_KEEP_SCRIPT=1 jai
+  -C`*conf* (with no command) to get a shell, and then examine the
+  file `$JAI_SCRIPT` from within the sandbox.
+
 `--command` *bash-command*
-: jai launches the jailed program you specify by running "`/bin/bash
-  -c` *bash-command* *cmd* *arg*...".  By default, *bash-command* just
-  runs the program as `"$0" "$@"`, but in configuration files for
-  particular programs, you can use *bash-command* to set environment
-  variables or add additional command-line options.
+: If you set this option, jai will launches the jailed program you
+  specify by running "`/bin/bash -c` *bash-command* *cmd* *arg*...".
+  You can run the program as `"$0" "$@"` in *bash-command*, but the
+  option allows you to set an environment variable or source an rc
+  script.  The `.defaults` file created by default uses `--command` to
+  source all the scripts you have specified with `--script`.
 
 `-u`
 : Unmounts all overlay directories from `/run/jai` and cleans up
@@ -474,6 +496,18 @@ Jai sets the following environment variables inside jails:
 
 `JAI_USER`
 : Set to the name of the user who invoked jai.
+
+`JAI_SCRIPT`
+: Inside a sandbox, if set, contains the path of a file containing the
+  concatenation of all the script files specified with `--script`
+  options.
+
+`JAI_KEEP_SCRIPT`
+: Usually the script file deletes itself as soon as it has been
+  sourced.  If it is reporting errors and you want to debug it, set
+  the JAI_KEEP_SCRIPT environment variable and the script will persist
+  for the duration of the sandbox.  jai will still try to delete it on
+  exit, however.
 
 `PWD`
 : Set to the current working directory.  Usually your shell will

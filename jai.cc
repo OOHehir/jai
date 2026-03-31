@@ -1,4 +1,5 @@
 #include "jai.h"
+#include "move_only_function.h"
 
 #include <cassert>
 #include <csignal>
@@ -13,6 +14,7 @@
 #include <ranges>
 #include <sys/mount.h>
 #include <sys/prctl.h>
+#include <sys/random.h>
 #include <sys/signalfd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -101,7 +103,8 @@ Config::init_credentials()
     err("cannot find password entry for uid {}", realuid);
 
   user_ = pw->pw_name;
-  homepath_ = pw->pw_dir;
+  homepath_ = path("/");
+  homepath_ /= pw->pw_dir;
   shell_ = pw->pw_shell;
   untrusted_cred_ = user_cred_ = Credentials::get_user(pw);
 
@@ -382,6 +385,57 @@ Config::make_private_passwd()
   w.reset();
 
   return xopenat(run_jai_user(), "passwd", O_RDONLY);
+}
+
+path
+Config::make_script()
+{
+  if (script_inputs_.empty())
+    return {};
+
+  auto restore = asuser();
+  Fd dir = xopenat(run_jai_user(), "tmp" / sandbox_name_, O_PATH | O_CLOEXEC);
+
+  Fd w = xopenat(*dir, ".", O_TMPFILE | O_WRONLY | O_CLOEXEC, 0400);
+  auto dowrite = [&w](std::string_view sv) {
+    auto *p = sv.data(), *e = p + sv.size();
+    while (p < e)
+      if (auto n = write(*w, p, e - p); n > 0)
+        p += n;
+      else {
+        assert(n == -1);
+        syserr("write scriptfile");
+      }
+  };
+
+  for (const auto &input : script_inputs_) {
+    dowrite(read_file(-1, input));
+    dowrite("\n");
+  }
+  dowrite(R"(
+# Remove $JAI_SCRIPT once sourced unless JAI_KEEP_SCRIPT is set
+if [[ -n $JAI_SCRIPT && -z ${JAI_KEEP_SCRIPT+set} ]]; then
+    rm -f "$JAI_SCRIPT"
+    unset JAI_SCRIPT
+fi
+)");
+
+  for (;;) {
+    std::array<unsigned char, 10> rndbuf;
+    errno = EAGAIN;
+    if (getrandom(rndbuf.data(), rndbuf.size(), 0) != rndbuf.size())
+      syserr("getrandom");
+    path fname = ".jairc";
+    for (auto i : rndbuf)
+      fname +=
+          "+0123456789=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+              [i & 0x3f];
+
+    if (linkat(*w, "", *dir, fname.c_str(), AT_EMPTY_PATH) == 0)
+      return "/tmp" / fname;
+    else if (errno != EEXIST)
+      syserr("{}/{}", fdpath(*dir), fname.c_str());
+  }
 }
 
 Fd
@@ -711,8 +765,9 @@ static pid_t main_pid = getpid();
 // Return stop signal if status indicates a child stopped, exit or
 // kill ourselves if the child terminated on a signal, and return 0
 // otherwise.
+template<typename AtExit = void (*)()>
 static int
-propagate_termination_status(int status)
+propagate_termination_status(int status, AtExit &&atexit = +[] {})
 {
   if (WIFSTOPPED(status)) {
     if (int sig = WSTOPSIG(status);
@@ -723,7 +778,10 @@ propagate_termination_status(int status)
     return 0;
   }
 
-  void (*do_exit)(int) = getpid() == main_pid ? exit : _exit;
+  auto do_exit = [&atexit](int status) {
+    atexit();
+    (getpid() == main_pid ? exit : _exit)(status);
+  };
 
   if (WIFEXITED(status))
     do_exit(WEXITSTATUS(status));
@@ -740,7 +798,7 @@ propagate_termination_status(int status)
 }
 
 static int
-wait_propagate(int pid)
+wait_propagate(int pid, auto &&atexit)
 {
   assert(pid > 0);
   int status;
@@ -748,6 +806,7 @@ wait_propagate(int pid)
   for (;;) {
     if (auto r = waitpid(-1, &status, WUNTRACED); r == -1) {
       if (errno != EINTR) {
+        atexit();
         if (getpid() == main_pid)
           syserr("waitpid");
         warn("waitpid: {}", strerror(errno));
@@ -755,23 +814,20 @@ wait_propagate(int pid)
       }
     }
     else if (r == pid)
-      if (auto sig = propagate_termination_status(status); sig > 0)
+      if (auto sig = propagate_termination_status(status, atexit); sig > 0)
         return sig;
   }
 }
 
 void
 Config::fix_proc()
-try {
+{
   xmnt_propagate(-1, "/", MS_PRIVATE);
   recursive_umount("/proc");
   xmnt_move(*make_mount(*xfsopen("proc", "proc"), MOUNT_ATTR_NOSUID |
                                                       MOUNT_ATTR_NODEV |
                                                       MOUNT_ATTR_NOEXEC),
             -1, "/proc");
-} catch (const std::exception &e) {
-  warn("{}", e.what());
-  _exit(1);
 }
 
 void
@@ -802,12 +858,20 @@ Config::exec(int nsfd, char **argv)
     read(*stop_me[0], &c, 1);
     parent_loop(pid, *stop_me[0]);
   }
-  stop_me[0].reset();
 
-  xsetns(nsfd, CLONE_NEWNS);
-  fix_proc();
-  pid1(std::move(stop_me[1]));
-  pid2(argv);
+  try {
+    stop_me[0].reset();
+    auto script_path = make_script();
+    xsetns(nsfd, CLONE_NEWNS);
+    fix_proc();
+    pid1(std::move(stop_me[1]), script_path);
+    if (!script_path.empty())
+      setenv("JAI_SCRIPT", script_path.c_str(), 1);
+    pid2(argv);
+  } catch (const std::exception &e) {
+    warn("{}", e.what());
+    _exit(1);
+  }
 }
 
 void
@@ -829,14 +893,14 @@ Config::parent_loop(pid_t pid, int stop_requests)
   static int rqfd;
   rqfd = stop_requests;
   // Flush pipe returning latest signal request or 0 if none
-  constexpr auto drain_pipe = +[]() {
+  constexpr auto drain_pipe = +[] {
     int ret = 0, n;
     unsigned char buf[8];
     while ((n = read(rqfd, buf, sizeof(buf))) > 0)
       ret = buf[n - 1];
     if (n == -1 && errno != EAGAIN && errno != EINTR) {
       static const char msg[] = "read from stop_request pipe failed\n";
-      write(2, msg, sizeof(msg)-1);
+      write(2, msg, sizeof(msg) - 1);
       _exit(1);
     }
     return ret;
@@ -893,8 +957,8 @@ Config::parent_loop(pid_t pid, int stop_requests)
 
 // Implement PID 1 in the new namespace.  Only returns for PID 2.
 void
-Config::pid1(Fd stop_me)
-try {
+Config::pid1(Fd stop_me, path script_path)
+{
   // Kill entire sandbox if parent jai process terminates
   prctl(PR_SET_PDEATHSIG, SIGKILL);
 
@@ -903,6 +967,15 @@ try {
   // one byte to the pipe so that a SIGPIPE kills us.
   if (write(*stop_me, "", 1) != 1)
     err("parent killed before PR_SET_PDEATHSIG");
+
+  std::function<void()> atexit = +[] {};
+  if (!script_path.empty())
+    atexit = [&script_path, sbold = xfstat(-1, script_path)] {
+      struct stat sbnew;
+      if (!stat(script_path.c_str(), &sbnew) && sbold.st_ino == sbnew.st_ino &&
+          sbold.st_ctime == sbnew.st_ctime)
+        unlink(script_path.c_str());
+    };
 
   // Return in pid 2, continue in pid 1
   auto pid = xfork();
@@ -939,17 +1012,14 @@ try {
     syserr("sigaction(SIGCONT)");
 
   for (;;) {
-    unsigned char sig = wait_propagate(pid);
+    unsigned char sig = wait_propagate(pid, atexit);
     write(*stop_me, &sig, 1);
   }
-} catch (const std::exception &e) {
-  warn("{}", e.what());
-  _exit(1);
 }
 
 void
 Config::pid2(char **argv)
-try {
+{
   if (mode_ == kCasual || mode_ == kBare)
     user_cred_.make_real();
   else
@@ -981,9 +1051,6 @@ try {
 
   execvpe(argv0, argv, const_cast<char **>(env.data()));
   perror(argv0);
-  _exit(1);
-} catch (const std::exception &e) {
-  warn("{}", e.what());
   _exit(1);
 }
 
@@ -1065,6 +1132,25 @@ Config::opt_parser(bool dotjail)
       err<Options::Error>("{}: configuration file not found", file.string());
   });
   opts(
+      "--script",
+      [this](path arg) {
+        arg = canonical(parsing_config_file_ ? homejaipath_ / arg : arg);
+        if (!std::ranges::contains(script_inputs_, arg))
+          script_inputs_.push_back(std::move(arg));
+      },
+      "Source SCRIPT in bash shell used to launch jail", "SCRIPT");
+  opts(
+      "--script?",
+      [this](path arg) {
+        try {
+          arg = canonical(parsing_config_file_ ? homejaipath_ / arg : arg);
+          if (!std::ranges::contains(script_inputs_, arg))
+            script_inputs_.push_back(std::move(arg));
+        } catch (const std::exception &) {
+        }
+      },
+      "Like --script but don't fail if SCRIPT does not exist", "SCRIPT");
+  opts(
       "--mask",
       [this](std::string_view arg) {
         path p(expand(arg));
@@ -1112,7 +1198,9 @@ Config::opt_parser(bool dotjail)
       "Undo the effects of --unsetenv=VAR, or set VAR=VALUE", "VAR[=VALUE]");
   opts(
       "--command", [this](std::string cmd) { shellcmd_ = std::move(cmd); },
-      R"(Bash command line to execute program (default: "$0" "$@"))", "CMD");
+      R"(Bash command line to execute program, e.g:
+source "${JAI_SCRIPT:-/dev/null}"; "$0" "$@")",
+      "CMD");
   opts(
       "--storage",
       [this](std::string_view s) {
@@ -1215,6 +1303,7 @@ The default is CMD.conf if it exists, otherwise default.conf)",
   ensure_file(conf.home_jai(true), ".defaults", jai_defaults, 0600,
               create_warn);
   ensure_file(conf.home_jai(), "default.conf", default_conf, 0600, create_warn);
+  ensure_file(conf.home_jai(), ".jairc", default_jairc, 0600, create_warn);
 
   if (opt_init) {
     ensure_file(conf.storage(), "default.jail", default_jail, 0600,

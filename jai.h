@@ -76,6 +76,7 @@ constexpr const char *kRunRoot = "/run/jai";
 extern const std::string jai_defaults;
 extern const std::string default_conf;
 extern const std::string default_jail;
+extern const std::string default_jairc;
 
 struct Config {
   enum Mode { kCasual, kBare, kStrict };
@@ -87,6 +88,7 @@ struct Config {
   std::set<std::string, std::less<>> env_filter_;
   std::map<std::string, std::string, std::less<>> setenv_;
   path cwd_;
+  std::vector<path> script_inputs_;
   std::string shellcmd_;
   PathSet mask_files_;
   bool mask_warn_{};
@@ -116,6 +118,7 @@ struct Config {
   void init_credentials();
   Fd make_idmap_ns();
   Fd make_mnt_ns();
+  path make_script();
   void exec(int nsfd, char **argv);
   void unmount();
   bool unmountall();
@@ -128,7 +131,7 @@ struct Config {
 
   static void fix_proc();
   [[noreturn]] static void parent_loop(pid_t jai_init_pid, int stop_requests);
-  void static pid1(Fd stop_me);
+  void static pid1(Fd stop_me, path script_path);
   [[noreturn]] void pid2(char **argv);
 
   [[nodiscard]] static Defer asuser(const Credentials *crp);

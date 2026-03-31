@@ -216,7 +216,7 @@ lock_or_validate(int dfd, path lockfile, Get get, Validate validate = {})
 std::string open_flags_to_string(int flags);
 
 inline Fd
-xopenat(int dfd, const path &file, int flags, mode_t mode = 0755)
+xopenat(int dfd, const path &file, int flags, mode_t mode = 0644)
 {
   if (int fd = openat(dfd, file.c_str(), flags, mode); fd >= 0)
     return fd;

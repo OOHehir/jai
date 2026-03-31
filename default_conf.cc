@@ -52,12 +52,19 @@ const std::string jai_defaults =
 
 # jail default
 
-# jai launches jailed programs by running bash with the command name
-# in "$0" and the arguments in "@".  Altering command allows you set
-# environment variables dynamically or add command-line arguments,
-# which is more useful to do in a non-default configuration file.
+# The script option loads bash source.  All files specified with
+# script will be concatenated and places in a single file that is
+# designated by the $JAI_SCRIPT environment variable.
+#
+# The command tells jai to launch programs by running bash with the
+# command name in "$0" and the arguments in "@".  Altering command
+# allows you set environment variables dynamically or change
+# command-line arguments.  The following settings enable shell aliases
+# and source the file $HOME/.jai/.jairc, into which you can store
+# shell functions and command aliases.
 
-# command "$0" "$@"
+script? .jairc
+command source "${JAI_SCRIPT:-/dev/null}"; "$0" "$@"
 
 # Masked files are deleted when an overlayfs is first created, but
 # have no effect on existing overlays or on strict/bare jails.  To
@@ -154,4 +161,37 @@ extern const std::string default_jail =
 
 mode casual
 
+)";
+
+extern const std::string default_jairc =
+  R"(# -*- shell-script-mode -*-
+
+# You can use this file to define bash functions invocable from jai.
+#
+# To use the file, you will need the following in your .defaults file:
+#
+# command source "${JAI_SCRIPT:-/dev/null}"; "$0" "$@"
+
+# Here is an example of how to define a bash function:
+#
+#      lscolor() {
+#        ls --color "$@"
+#      }
+#
+# or
+#
+#      lscolor() { ls --color "$@"; }
+#
+# The special variable "$@" gets expanded to all the parameters.  Note
+# that one-liner functions require a semicolon before the closing
+# brace.
+
+# Here are some example functions for people who like to live
+# dangerously.  These modes are not recommended, but if you are going
+# to use them anyway, better to define the dangerous functions in your
+# .jairc so you can only invoke them in jai environments.
+
+# claudeyolo() { claude --dangerously-skip-permissions "$@"; }
+
+# codexyolo() { codex --dangerously-bypass-approvals-and-sandbox "$@"; }
 )";
